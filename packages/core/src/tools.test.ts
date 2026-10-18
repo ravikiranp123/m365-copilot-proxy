@@ -1,4 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeAll, describe, it, expect } from "vitest";
+
+beforeAll(() => {
+  process.env.M365_ACCEPT_LEGACY_FENCES = "1";
+  process.env.M365_ACCEPT_LEGACY_JSON = "1";
+});
+
+afterEach(() => {
+  delete process.env.M365_INJECT_REPLY_TOOL;
+});
 import { parseToolCalls, formatToolDefinitions, looksLikeConfabulation, looksLikeHallucinatedCompletion, looksLikeRemoteArtifactCompletion, isProseDocument } from "./tools.js";
 import type { ToolDef } from "./tools.js";
 
@@ -146,16 +155,16 @@ describe("M365_INJECT_REPLY_TOOL", () => {
     delete process.env.M365_INJECT_REPLY_TOOL;
     const fmt = await importFormat();
     const out = fmt(userMsg, sampleTools);
-    expect(out).not.toContain("```reply");
+    expect(out).not.toContain("TOOL_REQUEST reply");
   });
 
   it("injects a reply tool when M365_INJECT_REPLY_TOOL is set", async () => {
     process.env.M365_INJECT_REPLY_TOOL = "1";
     const fmt = await importFormat();
     const out = fmt(userMsg, sampleTools);
-    expect(out).toContain("```reply");
+    expect(out).toContain("TOOL_REQUEST reply");
     // It must also still include the caller's tools (fenced template)
-    expect(out).toContain("```bash");
+    expect(out).toContain("TOOL_REQUEST bash");
     delete process.env.M365_INJECT_REPLY_TOOL;
   });
 
@@ -172,7 +181,7 @@ describe("M365_INJECT_REPLY_TOOL", () => {
     };
     const out = fmt(userMsg, [callerReply, ...sampleTools]);
     // Exactly one fenced template for the reply tool
-    const matches = out.match(/```reply/g) ?? [];
+    const matches = out.match(/TOOL_REQUEST reply/g) ?? [];
     expect(matches).toHaveLength(1);
     delete process.env.M365_INJECT_REPLY_TOOL;
   });
@@ -496,7 +505,7 @@ describe("fenced tool format (the only format)", () => {
       ],
       tools,
     );
-    expect(out).toContain("```write_file");
+    expect(out).toContain("TOOL_REQUEST write_file");
     expect(out).toContain("path: a.py");
     expect(out).not.toContain('{"tool":');
   });
@@ -521,17 +530,17 @@ describe("formatToolDefinitions", () => {
   it("emits the fenced contract (delegates to formatFencedToolDefinitions)", () => {
     const output = formatToolDefinitions(tools);
 
-    expect(output).toContain("TOOL USE IS REQUIRED");
-    expect(output).toContain("PRIMARY JOB");
-    expect(output).toContain("SECONDARY");
-    expect(output).toContain("ACTION"); // a fence is an executed action, not an illustration
+    expect(output).toContain("I can run external operations");
+    expect(output).toContain("I will run it manually");
+    expect(output).toContain("Ordinary Markdown");
+    expect(output).not.toContain("You have a real shell");
   });
 
   it("lists each tool as a fenced template inside <tools>", () => {
     const output = formatToolDefinitions(tools);
 
     expect(output).toContain("read_file"); // the tool name heads its template
-    expect(output).toContain("```read_file");
+    expect(output).toContain("TOOL_REQUEST read_file");
     expect(output).toContain("<tools>");
     expect(output).toContain("</tools>");
   });
@@ -649,7 +658,7 @@ describe("transcript style (which tags wrap the framing and harness system promp
   it("keeps <system> tags for baseline — the bench-tuned default is unchanged", async () => {
     const { formatMessages } = await import("./tools.js");
     const out = formatMessages(msgs, tools, undefined, undefined, "baseline");
-    expect(out).toMatch(/^<system>\nYou are the execution core/);
+    expect(out).toMatch(/^<system>\nI can run external operations/);
     expect(out).toContain("<system>\nYou are an autonomous coding agent.\n</system>");
     expect(out).not.toContain("harness_");
   });
@@ -660,7 +669,7 @@ describe("transcript style (which tags wrap the framing and harness system promp
       const out = formatMessages(msgs, tools, undefined, undefined, v);
       expect(out).not.toContain("<system>");
       expect(out).toContain("<harness_system_prompt>\nYou are an autonomous coding agent.\n</harness_system_prompt>");
-      expect(out).toContain("```bash"); // shell-routing survives
+      expect(out).toContain("TOOL_REQUEST bash"); // shell-routing survives
       expect(out).toContain("<user>\nfix the bug\n</user>");
     }
   });
@@ -672,10 +681,12 @@ describe("transcript style (which tags wrap the framing and harness system promp
     expect(out).not.toContain("<system>");
   });
 
-  it("tells the model its built-in sandbox is the wrong machine in every user-voice variant", async () => {
+  it("uses delegated execution for the shipped user-voice variants", async () => {
     const { formatToolDefinitions } = await import("./tools.js");
-    for (const v of ["honest", "terse_user", "relay", "relay_batch"]) {
-      expect(formatToolDefinitions(tools, v)).toMatch(/sandbox/);
+    for (const v of ["relay", "relay_batch"]) {
+      const output = formatToolDefinitions(tools, v);
+      expect(output).toContain("I will run it manually");
+      expect(output).toContain("TOOL_REQUEST bash");
     }
   });
 });

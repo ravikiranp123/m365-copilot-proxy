@@ -4,19 +4,20 @@ import {
   currentFramingVariant,
   deriveFencedSpec,
   findFirstToolFence,
+  findToolRequest,
   formatFencedToolDefinitions,
   parseFencedToolCalls,
-  renderFencedCall,
+  parseToolRequests,
+  renderToolRequest,
   transcriptStyleForVariant,
 } from "./fenced.js";
 
 const log = createLogger("tools");
 
-// Tool calls use the **fenced** Markdown format exclusively (see fenced.ts and
-// docs/hypotheses.md §9). The old `{"tool":...,"arguments":{}}` JSON format was
-// removed — it produced 0/5 on real agentic tasks; fenced + shell-routing produces
-// genuine multi-turn loops. We still *parse* a stray JSON tool call as a tolerance
-// fallback (M365 occasionally emits one), but we never instruct the model to use it.
+// TOOL_REQUEST is the primary, collision-free action syntax. M365's established
+// natural output, a sole recognised Markdown tool fence, remains a conservative
+// compatibility path. Embedded fences are content. Legacy JSON is opt-in because
+// JSON examples in documents are no less ambiguous than Markdown examples.
 
 // --- Types (standalone, no zod dependency) ---
 
@@ -230,7 +231,7 @@ export function formatMessages(
             },
           },
         });
-        return renderFencedCall(spec, argsObj);
+        return renderToolRequest(spec, argsObj);
       }).join("\n");
       const content = getMessageContent(m);
       parts.push(`<assistant>${content ? "\n" + content : ""}\n${calls}\n</assistant>`);
@@ -464,6 +465,9 @@ export function fabricatedToolResponseAt(text: string, tools?: ToolDef[]): numbe
  * decides.
  */
 export function isProseDocument(parsed: ParseResult, text?: string, tools?: ToolDef[]): boolean {
+  // TOOL_REQUEST is unambiguous. This heuristic remains only for explicitly
+  // enabled legacy bare-fence parsing.
+  if (!process.env.M365_ACCEPT_LEGACY_FENCES) return false;
   if (!parsed.hasToolCalls || parsed.toolCalls.length < 2) return false;
   if (text !== undefined && tools && tools.length > 0) {
     const first = findFirstToolFence(text, buildSpecMap(tools));
@@ -493,20 +497,54 @@ function looksLikeDocumentPreamble(preamble: string): boolean {
  *  used to tell the model its tail was written before the call ran. */
 export function textAfterFirstToolCall(text: string, tools?: ToolDef[]): string {
   if (!tools || tools.length === 0) return "";
-  const first = findFirstToolFence(text, buildSpecMap(tools));
+  const specs = buildSpecMap(tools);
+  const request = findToolRequest(text, specs);
+  if (request) return text.slice(request.end).trim();
+
+  const legacy = parseFencedToolCalls(text, specs);
+  const first = legacy.calls.length === 1 && legacy.leftover.trim() === ""
+    ? findFirstToolFence(text, specs)
+    : process.env.M365_ACCEPT_LEGACY_FENCES
+      ? findFirstToolFence(text, specs)
+      : null;
   return first ? text.slice(first.end).trim() : "";
 }
 
 export function parseToolCalls(text: string, tools?: ToolDef[]): ParseResult {
-  // Fenced is the format: parse ```toolname blocks first. Needs the tool schemas
-  // to map header/body args. The JSON parse below is only a tolerance fallback for
-  // when M365 ignores the contract and emits a `{"tool":...}` object anyway.
+  // TOOL_REQUEST is the only executable syntax by default. Bare Markdown
+  // fences remain content, making documentation generation collision-free.
   const specMap = tools && tools.length > 0 ? buildSpecMap(tools) : null;
   if (specMap) {
-    const { calls, leftover } = parseFencedToolCalls(text, specMap);
-    if (calls.length > 0) {
-      return { hasToolCalls: true, toolCalls: calls, textContent: cleanLooseText(leftover) };
+    const primary = parseToolRequests(text, specMap);
+    if (primary.calls.length > 0) {
+      return {
+        hasToolCalls: true,
+        toolCalls: primary.calls,
+        textContent: cleanLooseText(primary.leftover),
+      };
     }
+
+    // M365 naturally writes Markdown tool fences. Accept one only when the
+    // entire response is that one recognised fence; prose, multiple fences and
+    // document examples remain content. The env flag is a temporary permissive
+    // migration path for stale conversations that put prose around a call.
+    const legacy = parseFencedToolCalls(text, specMap);
+    const soleFence = legacy.calls.length === 1 && legacy.leftover.trim() === "";
+    if (soleFence || process.env.M365_ACCEPT_LEGACY_FENCES) {
+      if (legacy.calls.length > 0) {
+        return {
+          hasToolCalls: true,
+          toolCalls: legacy.calls,
+          textContent: cleanLooseText(legacy.leftover),
+        };
+      }
+    }
+  }
+
+  // JSON tool calls are legacy and collision-prone. Keep them only as an
+  // explicit migration option; ordinary JSON documentation is content.
+  if (!process.env.M365_ACCEPT_LEGACY_JSON) {
+    return { hasToolCalls: false, toolCalls: [], textContent: cleanLooseText(text) };
   }
 
   // The spec map carries the shell aliases too, so a JSON call naming a leaked

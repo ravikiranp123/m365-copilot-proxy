@@ -31,9 +31,12 @@ These are what actually move compliance. In rough order of importance:
    harness's shell tool (any name: `bash`/`run`/`run_command`/…). This is what turned
    the bench from **0/5 → real multi-turn loops** (a verified 9-tool-call fix-bug solve).
    ([hyp §9 F12].)
-3. **Fenced format, not JSON.** Tools are emitted as Markdown code fences (info-string
-   = tool name), not `{"tool":…}` JSON. JSON scored **0/5** on real agentic tasks; the
-   multi-line-body escaping burden was a prime suspect. ([hyp §8.12, §9].)
+3. **Shell-shaped output, not JSON.** The model's proven natural action is a Markdown
+   shell fence; JSON scored **0/5** on real agentic tasks. The proxy now asks for a
+   `TOOL_REQUEST` envelope so Markdown file content cannot collide with actions, while
+   conservatively accepting one whole-response recognised fence during migration. The
+   new envelope's live compliance is not yet benchmarked, so the fence path remains the
+   reliability backstop. ([hyp §8.12, §9, §39].)
 4. **Anti-confabulation + first-move framing.** Explicitly telling the model it has run
    nothing yet, the files are real, and its FIRST output must be a ```` ```bash ```` block
    flips the stochastic turn-1 "I can't access the files, please paste them" reflex toward

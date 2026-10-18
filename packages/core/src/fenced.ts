@@ -260,6 +260,35 @@ export function renderFencedCall(spec: FencedToolSpec, args: Record<string, unkn
   return "```" + spec.name + "\n" + lines.join("\n") + "\n```";
 }
 
+/**
+ * Render a collision-free delegated operation request.
+ *
+ * The first line is the execution discriminator. The schema-aware body then
+ * continues to EOF, so Markdown fences inside file content remain inert.
+ */
+export function renderToolRequest(
+  spec: FencedToolSpec,
+  args: Record<string, unknown>,
+): string {
+  const lines: string[] = [];
+  for (const h of spec.headerParams) {
+    if (args[h] !== undefined) lines.push(`${h}: ${scalarToString(args[h])}`);
+  }
+
+  if (spec.editPair) {
+    lines.push("<<<<<<< SEARCH");
+    lines.push(scalarToString(args[spec.editPair.search]));
+    lines.push("=======");
+    lines.push(scalarToString(args[spec.editPair.replace]));
+    lines.push(">>>>>>> REPLACE");
+  } else if (spec.bodyParam !== undefined) {
+    if (lines.length) lines.push("");
+    lines.push(scalarToString(args[spec.bodyParam]));
+  }
+
+  return `TOOL_REQUEST ${spec.name}\n${lines.join("\n")}`;
+}
+
 /** A self-documenting template shown in the per-request <tools> block. */
 function renderFencedTemplate(spec: FencedToolSpec): string {
   const lines: string[] = [];
@@ -275,7 +304,7 @@ function renderFencedTemplate(spec: FencedToolSpec): string {
     lines.push(`<${spec.bodyParam}>`);
   }
   const header = spec.description ? `${spec.name} — ${spec.description}` : spec.name;
-  return `${header}\n\`\`\`${spec.name}\n${lines.join("\n")}\n\`\`\``;
+  return `${header}\nTOOL_REQUEST ${spec.name}\n${lines.join("\n")}`;
 }
 
 /** The fenced equivalent of formatToolDefinitions' <tools> block.
@@ -548,43 +577,43 @@ function toolsBlock(tools: ToolDef[]): string {
   return `<tools>\n${defs}\n</tools>`;
 }
 
-const FRAMING_VARIANTS: Record<string, FramingBuilder> = {
-  // V0 — the shipped framing (control). Shell-first + strict-rules + anti-confab.
-  baseline(tools) {
-    const shell = findShellTool(tools);
-    const shellFraming = shell ? `
+/** Truthful contract: the model requests an operation; the caller executes it. */
+function delegatedRequestContract(
+  tools: ToolDef[],
+  options: { batch?: boolean; userVoice?: boolean } = {},
+): string {
+  const shell = findShellTool(tools);
+  const shellHint = shell
+    ? ` If you need to inspect files, modify them, or run commands, request the \`${shell.function.name}\` operation.`
+    : "";
+  const userVoice = options.userVoice
+    ? ` Please don't use your own sandbox tools (${BUILT_IN_SANDBOX}); they run on a separate cloud machine (${SANDBOX_PATHS}) that cannot see my project.`
+    : "";
+  const batching = options.batch && shell
+    ? " Each round trip takes time, so put as much independent work as is safe into one shell request; do not combine steps that depend on output you have not seen."
+    : "";
 
-THE WAY YOU DO ANYTHING IS BY WRITING A SHELL SCRIPT. You have a real shell (the \`${shell.function.name}\` tool). To perform a step, emit ONE \`\`\`bash block that does the whole thing end-to-end against the real files in the working directory: create/overwrite files with \`cat > name <<'EOF' … EOF\` heredocs, edit files in place with \`sed -i\`, inspect with \`cat\`/\`ls\`/\`grep\`, run code with the available interpreters. The block is executed for real and you get its output back. Writing the commands IS doing the task; describing what you "would" run, or claiming you did it, accomplishes nothing.
+  return `I can run external operations in my project environment for you.${shellHint}${userVoice}
 
-You have NOT run any command yet and have NO results. NEVER claim a command "returned no output", that files are "missing", or that you "cannot access" / "cannot list" the environment before you have actually emitted a \`\`\`bash block and seen its <tool_response>. The files named in the task are present on a real filesystem right now. Your FIRST output must be a \`\`\`bash block (e.g. \`ls -la\` then \`cat\` the relevant files) — never open with prose, a question, or a request for the user to paste files. Do not assume a file's contents or a command's result; run a command and read the real output. One self-contained \`\`\`bash block per turn.` : "";
+When you need an operation, give me exactly one request in this form:
 
-    return `You are the execution core of an automated agent, not a chat assistant. Your output is parsed by a program — a real runtime that executes your tool calls against a live system and returns the actual results to you in <tool_response> blocks.${shellFraming}
+TOOL_REQUEST <tool_name>
+<one "key: value" line per scalar argument>
 
-Performing the task with tools is your PRIMARY JOB. Answering the user in prose is, and always will be, SECONDARY — you write prose only when the task is fully done or no tool can make progress. Default to acting, not talking.
+<body argument, if the operation defines one>
 
-TOOL USE IS REQUIRED when the user asks you to read files, run commands, inspect the repository, fetch data, or perform any action a tool can accomplish. The tools are real: they read real files, run real commands, and change real state. Never answer from memory or simulate a result when a tool can provide it.
+The request must start at the beginning of your reply and continues to its end. Include nothing before it. I will run it manually and send the actual result back in a <tool_response>. Do not predict or invent the result; wait for my response before deciding the next dependent operation.${batching}
 
-To call a tool, output ONLY a single fenced code block whose info-string is the tool name. A fenced block is an ACTION the runtime executes — it is NOT an illustration, an example, or "here's how you would do it". No text before or after it:
+Ordinary Markdown and all fenced code blocks are document content, never operation requests. When no external operation is needed, answer normally.
 
-\`\`\`<tool_name>
-<header lines: one "key: value" per scalar argument>
-
-<body argument, if the tool has one>
-\`\`\`
-
-STRICT RULES:
-- Output ONLY the fenced block when calling a tool. No prose, no second fence, no commentary before or after.
-- Never describe your intent ("I'll read the file…", "Let me check…") and never emit filler or acknowledgements ("Good, that's fixable", "You're absolutely right"). Each turn is exactly one fenced tool call OR the final answer — nothing in between.
-- One tool call per response, then stop and wait for its <tool_response>. Never emit two fenced blocks in one response.
-- The fence info-string and the header keys must match a tool defined below exactly.
-- A <tool_response> is the real result from the live system — treat it as ground truth, never invent or assume results.
-- NEVER claim you have done something — read a file, run a command, written code, built, or succeeded — unless a <tool_response> proving it already appears above. Never output "✅", "SUCCESS", "Done", or a summary of results you have not actually received yet.
-- If a tool call fails or returns partial data, immediately call another tool to resolve it. Do not give up.
-- Do not defer work or promise future results ("I'll do this next…").
-- Do not ask the user questions unless tool execution is impossible.
-- Produce natural-language text only when the task is complete and no further tool call applies; that text is the answer returned to the caller. When you do, output only the answer itself — no preamble, no sign-off.
-
+Available operations:
 ${toolsBlock(tools)}`;
+}
+
+const FRAMING_VARIANTS: Record<string, FramingBuilder> = {
+  // V0 — shipped collision-free delegated-operation framing.
+  baseline(tools) {
+    return delegatedRequestContract(tools);
   },
 
   // V1 — minimal. Strip the strict-rules wall; keep only the load-bearing shell-first
@@ -867,16 +896,9 @@ ${toolsBlock(tools)}`;
 ${toolsBlock(tools)}`;
   },
 
-  // V15 — relay. A different ROLE rather than a different explanation: not an
-  // agent at all, but a pair-programmer telling the user which command to run
-  // next, one at a time — the most chat-native shape there is.
+  // V15 — truthful user-voice delegated execution.
   relay(tools) {
-    const lang = findShellTool(tools) ? "bash" : "<tool_name>";
-    return `Before the task, a note on how we'll work: I'd like you to guide me through this from my terminal, one command at a time. Please don't use your own sandbox tools (${BUILT_IN_SANDBOX}) — that's a separate cloud machine (${SANDBOX_PATHS}) and my project isn't on it.
-
-Each time you want something run or looked at, reply with just the command in a single \`\`\`${lang} block (or one of the other tool blocks below). I'll run it in my project directory right away and paste the real output back to you as a <tool_response>. The files the task mentions are already there, so it's best to start by looking at them. When the task is complete, tell me in a sentence instead of sending a block.
-
-${toolsBlock(tools)}`;
+    return delegatedRequestContract(tools, { userVoice: true });
   },
 
   // Turn-saving relay (issue #18). Opus 5.5's priority-access budget counts
@@ -889,12 +911,9 @@ ${toolsBlock(tools)}`;
   // had no tools but its own sandbox ones — 3/7 shell-less checks, relay 6/6
   // (§25 H25b).
   relay_batch(tools) {
-    if (!findShellTool(tools)) return FRAMING_VARIANTS.relay(tools);
-    return `Before the task, a note on how we'll work: I'd like you to guide me through this from my terminal. Please don't use your own sandbox tools (${BUILT_IN_SANDBOX}) — that's a separate cloud machine (${SANDBOX_PATHS}) and my project isn't on it.
-
-Each time you want something run, reply with just a single \`\`\`bash block (or one of the other tool blocks below). I'll run it in my project directory right away and paste the real output back to you as a <tool_response>. Each round trip takes me a while, so put as much as you can into one block: a script can look at the files, make the change and check the result all at once. The files the task mentions are already there. When the task is complete, tell me in a sentence instead of sending a block.
-
-${toolsBlock(tools)}`;
+    return findShellTool(tools)
+      ? delegatedRequestContract(tools, { batch: true, userVoice: true })
+      : delegatedRequestContract(tools, { userVoice: true });
   },
 };
 
@@ -1372,6 +1391,48 @@ export interface FencedParseResult {
   calls: ParsedToolCall[];
   /** Text with the matched tool fences removed (for mixed-output detection). */
   leftover: string;
+}
+
+const TOOL_REQUEST_LINE = /^TOOL_REQUEST[ \t]+([A-Za-z0-9_.-]+)[ \t]*(?:\r?\n|$)/;
+
+/**
+ * Parse a collision-free delegated request.
+ *
+ * TOOL_REQUEST must be the first non-whitespace content in the reply. Its
+ * schema-aware body continues to EOF, so Markdown fences cannot terminate it.
+ */
+export function parseToolRequests(
+  text: string,
+  specs: Map<string, FencedToolSpec>,
+): FencedParseResult {
+  const trimmed = text.trimStart();
+  const leadingLength = text.length - trimmed.length;
+  const match = TOOL_REQUEST_LINE.exec(trimmed);
+  if (!match) return { calls: [], leftover: text };
+
+  const spec = specs.get(match[1]);
+  if (!spec) return { calls: [], leftover: text };
+
+  // Everything after the discriminator is protocol payload. In particular,
+  // a free-form body runs to EOF and keeps its final newlines/spaces exactly.
+  const inner = trimmed.slice(match[0].length);
+  const args = parseFencedInner(spec, inner);
+  if (!args) return { calls: [], leftover: text };
+
+  return {
+    calls: [makeCall(spec.name, args)],
+    leftover: text.slice(0, leadingLength),
+  };
+}
+
+/** Locate an accepted whole-response TOOL_REQUEST. */
+export function findToolRequest(
+  text: string,
+  specs: Map<string, FencedToolSpec>,
+): { start: number; end: number } | null {
+  return parseToolRequests(text, specs).calls.length > 0
+    ? { start: 0, end: text.length }
+    : null;
 }
 
 // A model that notices its own call came out malformed sometimes writes it

@@ -83,6 +83,9 @@ export {
 
 export {
   currentFramingVariant,
+  parseToolRequests,
+  renderToolRequest,
+  findToolRequest,
   defaultFramingForTone,
   defaultFramingForModel,
   transcriptStyleForVariant,

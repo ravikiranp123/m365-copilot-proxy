@@ -1,4 +1,8 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { beforeAll, describe, it, expect, vi, afterEach } from "vitest";
+
+beforeAll(() => {
+  process.env.M365_ACCEPT_LEGACY_FENCES = "1";
+});
 
 // Replace core's ModelSession with a scripted fake so we can exercise the handler's
 // streaming path with no auth/WebSocket. Everything else in core stays real.
@@ -488,16 +492,16 @@ describe("Disengage retry keeps a model's <system>-free framing", () => {
   it("retries Sonnet 5 with relay again, never a <system>-tagged framing", async () => {
     const retry = await disengageThenAnswer("claude-sonnet-5");
     expect(retry).not.toContain("<system>");
-    expect(retry).toContain("guide me through this from my terminal, one command at a time");
-    expect(retry).not.toContain("put as much as you can into one block");
+    expect(retry).toContain("TOOL_REQUEST bash");
+    expect(retry).not.toContain("put as much independent work as is safe into one shell request");
   });
 
   it("sends Opus, Sonnet 4.6 and GPT-6 relay_batch on the first try and keeps it on the retry (§24, §25)", async () => {
     for (const model of ["claude-opus-4.8", "claude-opus", "claude-sonnet", "gpt-6-think-deeper"]) {
       const retry = await disengageThenAnswer(model);
-      expect(scripted.texts[0]).toContain("put as much as you can into one block");
+      expect(scripted.texts[0]).toContain("put as much independent work as is safe into one shell request");
       expect(scripted.texts[0]).not.toContain("<system>");
-      expect(retry).toContain("put as much as you can into one block");
+      expect(retry).toContain("put as much independent work as is safe into one shell request");
     }
   });
 
@@ -610,7 +614,7 @@ describe("GPT-6 Sol: agent on premium, learned fallback on non-premium (#23)", (
     expect(scripted.newConversations).toBe(1);
     // The retry is the whole request, not a "Please continue." into nothing.
     expect(scripted.texts[1]).toContain("list files");
-    expect(scripted.texts[1]).toContain("```bash");
+    expect(scripted.texts[1]).toContain("TOOL_REQUEST bash");
   });
 
   it("remembers it: the next request goes agent-less from the start", async () => {

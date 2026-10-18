@@ -5629,3 +5629,51 @@ bursty. Falsifier: fresh-conversation retries failing at the same rate as same-c
 Cost to watch: each such retry starts a conversation, which is what the F13 thread-rate throttle
 counts. Bounded to one per dropped turn, but on a bad `InternalError` day it adds up; the same
 afternoon's benching (one conversation per run) did trip `PerUserThrottled`.
+
+
+---
+
+## 39. Oct 18 2026 — collision-free `TOOL_REQUEST` envelope with conservative fence compatibility
+
+### H39 — an explicit start discriminator can separate actions from Markdown without losing M365's shell reflex 🟡
+
+**Problem.** F15 showed that treating every recognised Markdown fence as executable can run
+the model's own documentation. A README body containing `bash` examples is valid content, but
+the old parser could mistake those examples for operations. The heuristic document guard
+reduced the risk but could not make the syntax intrinsically unambiguous.
+
+**Change.** The primary syntax is now a whole-response envelope:
+
+```text
+TOOL_REQUEST <known-tool>
+<scalar headers>
+
+<free-form body through EOF>
+```
+
+The marker must be the first non-whitespace content, names a tool supplied on the request,
+and represents exactly one call. A free-form body continues through EOF, preserving Markdown
+fences and final whitespace. Historical assistant calls are rendered in the same form.
+Legacy JSON parsing is off by default (`M365_ACCEPT_LEGACY_JSON=1` restores it).
+
+**Compatibility.** M365's established natural action remains a Markdown tool fence, especially
+`bash`. The default parser therefore accepts exactly one recognised fence only when it occupies
+the whole response. Prose plus a fence, multiple fences, and document-embedded examples remain
+content. `M365_ACCEPT_LEGACY_FENCES=1` restores the permissive parser for stale conversations.
+The model-aware `relay` and `relay_batch` defaults retain the proven wrong-sandbox warning.
+
+**Unit evidence.** Round trips cover shell requests, Markdown-in-`write_file`, final body
+whitespace, unknown operations, marker-after-prose rejection, sole-fence compatibility,
+multiple-fence rejection, and opt-in JSON. This proves parser discrimination, not model
+compliance.
+
+**Prediction.** On unfakeable tasks, `TOOL_REQUEST` will prevent F15-style document execution
+while matching the fenced control's solve rate within ordinary run-to-run noise. When M365
+ignores the new syntax, the sole-fence compatibility path will preserve the established shell
+reflex.
+
+**Falsification / probe.** Run a sequential, rotated A/B on `fix-bug`, `find-needle`, and
+`edit-config`: existing fenced relay control versus the delegated envelope, then confirm in
+real pi. Record first-turn action rate, solve rate, turns per task, malformed calls,
+Disengages, confab retries, and which parser path served each call. A material solve-rate or
+first-turn regression means the envelope must remain experimental rather than the default.

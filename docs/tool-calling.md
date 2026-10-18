@@ -1,131 +1,75 @@
 # Tool Calling Contract
 
-This proxy translates OpenAI-compatible tool calls to/from M365 Copilot. Because M365 doesn't natively support the OpenAI tool-calling protocol, we prompt-engineer it via a system prompt and enforce the contract at the proxy layer.
+This proxy translates OpenAI-compatible tool calls to and from M365 Copilot. M365 has no native OpenAI tool-call channel on this path, so actions arrive as assistant text and the proxy must distinguish an operation from Markdown the user asked it to write.
 
-## Output Contract
+## Primary output contract: `TOOL_REQUEST`
 
-Tool calls are **fenced** (Markdown code blocks) — the JSON `{"tool":...}` format
-was removed (it scored 0/5 on real agentic tasks; see [hypotheses §9](./hypotheses.md)).
-A tool call is a code fence whose info-string is the tool name:
+A call is a whole-response delegated-operation envelope:
 
+```text
+TOOL_REQUEST <tool_name>
+<one "key: value" line per scalar argument>
+
+<body argument, if the tool defines one>
 ```
-` ``read_file
-/etc/hostname
-` ``
+
+The discriminator must be the first non-whitespace content, and the tool name must resolve to a tool supplied on that request. Exactly one request is accepted. Headers use the existing schema-aware coercion. After the first blank line, a free-form body continues to EOF and preserves its whitespace.
+
+That makes Markdown file content unambiguous:
+
+````text
+TOOL_REQUEST write_file
+path: README.md
+
+# Setup
+
+```bash
+pnpm install
 ```
+````
 
-Per-tool shape: the fence info-string is the tool name, scalar args are `key: value`
-header lines, one free-form arg is the fence body, and an `old`/`new` pair renders as an
-aider-style `SEARCH/REPLACE` diff.
+The inner `bash` fence is literal `README.md` content. Conversely, a normal answer:
 
-**Shell-routing (the load-bearing trick).** M365's chat model won't "act as an agent" on
-demand but *will* reflexively write a ` ```bash ` block. When the toolset includes a shell
-tool (`bash`/`shell`/`run`/`run_command`/… — any name), the proxy injects "do the whole step
-by writing one ` ```bash ` block" framing and routes that block to the shell tool. This is
-what turns 0/5 into real multi-turn loops. See [hypotheses §9 F12](./hypotheses.md).
+````markdown
+Run this command:
 
-## Enforcement
+```bash
+pnpm install
+```
+````
 
-The contract is enforced at three layers:
+has no `TOOL_REQUEST` discriminator and is returned as text.
 
-### 1. System Prompt (packages/core/src/tools.ts)
+Edits keep the existing aider-style `SEARCH/REPLACE` body. Historical assistant `tool_calls` are rendered back into the transcript with `TOOL_REQUEST`, so the model sees one consistent primary syntax.
 
-`formatFencedToolDefinitions()` injects the contract into every tool-enabled request:
-- "Performing the task with tools is your **PRIMARY JOB**. Answering the user in prose is, and always will be, SECONDARY."
-- A fenced block is an **ACTION the runtime executes**, not an example/illustration.
-- **Shell-first framing** when a shell tool is present: "do the whole step by writing ONE ` ```bash ` block" (heredocs to create, `sed` to edit, `cat`/`ls`/`grep` to inspect), plus **anti-confabulation** ("you've run nothing yet — never claim commands return no output; your FIRST output is a ` ```bash ` block"). This framing is what made it work through real pi (hypotheses §9 F14).
-- "**Never claim success** (`✅`/`SUCCESS`/`Done`) unless a `<tool_response>` proving it already appears above" — M365 loves to declare victory before the build runs.
-- "When you do give the final answer, **no preamble/sign-off**".
-- **Host-platform note** (`hostPlatformNote`, Windows only): every framing variant above
-  teaches POSIX idioms *by name* — heredocs, `sed -i`, `ls`/`grep` — so on Windows the
-  prompt instructs the model, on every turn, to emit commands the host cannot run. The note
-  states the real platform and gives the PowerShell equivalents. It is empty off Windows, so
-  the bench-tuned variants stay byte-for-byte unchanged; `platform` is injectable so the
-  Windows branch is testable from a POSIX box. (#7.)
+## Conservative M365 fence compatibility
 
-**Shell fence aliases** (`SHELL_LANGS` in `fenced.ts`): a fence only becomes a tool call if
-its info-string is a known shell alias — POSIX (` ```bash `/`sh`/`shell`/`zsh`/…), the leaked
-`container.*` runtime namespace (§12.13), and Windows (` ```powershell `/`pwsh`/`ps1`/`cmd`/
-`bat`). Anything else is demoted to prose. Windows fences were **missing until 2026-08-17**,
-so a model correctly told to use PowerShell produced turns that executed nothing — which read
-to users as the model ignoring their instructions, and pushed it toward M365's own Linux
-sandbox as the only filesystem it could reach (#7, #12). Windows aliases route regardless of
-host: the proxy and harness need not share a machine, and a command that runs and fails
-returns an error the model can correct from, whereas an unrouted fence loses the turn.
+The established M365 behaviour is to emit a Markdown tool fence, especially a `bash` fence. Shell-routing is the empirically load-bearing behaviour that first turned 0/5 into real multi-turn loops (hypotheses §9 F12), so migration does not drop it.
 
-### 2. Copilot Studio Agent System Prompt (packages/core/src/agent.ts)
+By default, the proxy accepts a legacy fence only when:
 
-The most important layer: an auto-created Copilot Studio agent carries tool-calling
-instructions in its **server-side** system prompt. Without the agent, M365 ignores the
-per-request injection and answers in prose (or hallucinates). See
-[m365-copilot-api.md](./m365-copilot-api.md) for why.
+1. Its info string resolves to a supplied tool or recognised shell alias.
+2. Exactly one tool call parses.
+3. Removing that fence leaves only whitespace.
 
-These instructions are baked in at agent-creation time and can't be cheaply updated in
-place, so the agent is **versioned by name**: it's called `m365-tool-agent-<hash>`, where
-`<hash>` is a short SHA-256 of the current instructions. Editing `getAgentInstructions()`
-changes the hash, so the next request provisions a fresh agent; old versions are **never
-deleted** (multi-host safety — a second proxy may still be using one). Hosts sharing a tenant
-compute the same name for the same instructions and converge on one agent with no coordination.
+A fence after prose, multiple fences, and fences inside a Markdown document are therefore content. `M365_ACCEPT_LEGACY_FENCES=1` restores the older permissive parser for stale agents or conversations.
 
-### 3. Behaviour-hardening layer (packages/proxy-lib/src/handler.ts, tools.ts)
+The retired `{"tool":...,"arguments":...}` format is disabled by default. Set `M365_ACCEPT_LEGACY_JSON=1` only for migration. It is collision-prone inside documents and scored 0/5 on the original agentic benchmark.
 
-The model's output is scrubbed and steered at the proxy regardless of whether it obeyed
-the prompt — the durable lever, since M365's chat-RLHF leaks through no matter how the
-prompt is tuned. The layers, in handler order:
+## Prompting and model-specific framing
 
-- **Stop sequence at a self-written `<tool_response>`** (`truncateAtFabricatedToolResponse`):
-  only the proxy sends tool results, so a `<tool_response>` in the model's own output is
-  invented. Sonnet 4.6 writes one after its fence in about half its turns and then acts on the
-  fiction; everything from the tag on is cut, keeping the real call at the head. Runs first, so
-  the invented tail can't make the turn look like a document below. (#31.) The proxy also watches
-  for the tag while the turn streams, and once the invented tail is 2,000 chars long it stops the
-  turn, as a client's Stop would, instead of waiting for M365 to finish: an invented continuation
-  can run for minutes (45–69 k chars, long enough for pi's timeout). Not at the tag itself: M365
-  keeps the whole message in the conversation, the model seems to follow a short tail (the usual
-  kind, median ~400 chars) as its plan, and stopping at the tag cost Sonnet 4.6 10% more turns in real pi;
-  with the cap it takes as many turns as when the turn runs to its end, and no runaway gets far
-  (#65, hyp §35 F88, F89). `M365_EARLY_STOP_AFTER` sets the cap (`0` = at the tag);
-  `M365_NO_EARLY_STOP=1` waits for the end of the turn.
-- **Document guard** (`isProseDocument`): shell-routing turns *every* ` ```bash ` block into
-  a tool call — so a model that ANSWERS with a markdown document full of code fences (e.g.
-  "here's a simplified README") would get its own answer executed as shell. A response that
-  looks like a document (≥2 fences AND ≥120 chars surrounding prose, OR ≥4 fences) is returned
-  as **text**, not executed. A single action is never reclassified. (hypotheses §9 F15.) A reply
-  that **opens** with a tool call (a preamble under 200 chars, no heading, no code fence before
-  it) is always an action: its tail was written before the call's result existed. Judged by
-  the whole text, that tail made 34 of 42 guard verdicts in one day's bench runs. (#33.)
-- **Only-the-first-call-ran note** (`executedOnlyFirstNote`): when the proxy runs less than the
-  model wrote (a cut invented result, dropped batched calls, or a tail after the call), the
-  next tool result is prefixed with a one-line note saying so. M365 keeps the whole reply in
-  its own history, and without the note the model believes its invented results happened
-  ("the task is already complete!"). (#31.)
-- **Confabulation retry** (`looksLikeConfabulation`): if a tool request comes back with no
-  tool call and give-up prose ("can't access the files", "commands return no output", "the
-  file appears empty", "paste the files"), the proxy re-prompts forcefully **in the same
-  conversation** to force a real first action. `M365_NO_CONFAB_RETRY` / `M365_CONFAB_RETRIES`.
-- **Hallucinated-completion retry** (`looksLikeHallucinatedCompletion`): if the model CLAIMS
-  a file mutation ("I've replaced the README") with **no tool call all conversation**, force a
-  real write. Gated on "never acted," so it won't misfire on a genuine post-write summary.
-- **Tool-result labelling:** each `<tool_response>` is tagged with the command that produced
-  it (`<tool_response tool="bash" command="ls -la">`) by correlating `tool_call_id` back to
-  the call — so the model reads output in context (a listing vs file contents vs stdout)
-  instead of e.g. misreading an `ls` result as an empty file. (hypotheses §9 F16.)
-- **Mixed output:** when a response has tool calls AND extra text, the text is **stripped**;
-  the client gets only `tool_calls` with `content: null` (stripped text is logged).
-- **Invented JSON:** `parseToolCalls()` removes `{"confidence":N}`, **drops** a `{"final":…}`
-  riding alongside tool calls (premature success), and **unwraps** a lone `{"final":"…"}`.
-- **One call per turn:** keeps only the **first** tool call; M365 batches its whole plan into
-  one response, running later steps on guessed state. Override with `M365_ALLOW_MULTI_TOOL`.
-- **Explicit throttle → 429:** a turn whose final item says `result.value: "Throttled"`
-  (`errorCode: "PerUserThrottled"`) returns **429** `code: "m365_throttled"` after one attempt,
-  instead of being retried as an "empty" reply. (#35.)
-- **Empty ≠ rate limit:** an empty reply is treated as throttling only when the throttle is
-  **at-limit**; otherwise it fails fast after a couple of quick retries. Repeated empties
-  across **distinct conversations** (the thread-rate-throttle signature) trigger **degradation
-  backoff** — the proxy paces subsequent turns so the account self-heals. This replaced the
-  old auto-reauth: a fresh login does **not** clear this throttle (`oid`-keyed — hypotheses
-  §11 H-R1) and raised our detection profile. `M365_NO_BACKOFF` to disable.
+`formatFencedToolDefinitions()` retains its historical name, but the shipped `baseline`, `relay`, and `relay_batch` defaults now describe delegated operations and render `TOOL_REQUEST` templates. The Copilot Studio agent carries the same format-only contract in its server-side instructions.
 
-> The JSON tool format and the few-shot block were **removed** this cycle (0/5 on real
-> agentic tasks). Tool calling is fenced-only; behavioural framing lives in the per-request
-> `<tools>` block, not a baked-in few-shot.
+The model-aware defaults remain important:
+
+- `baseline` uses the direct delegated-operation contract.
+- `relay` and `relay_batch` keep the user-voice warning that M365 or Claude's built-in sandbox is a separate cloud machine which cannot see the harness project.
+- `relay_batch` still asks for as much independent work as is safe in one shell request, without combining steps that depend on unseen output.
+
+Non-default experiment variants remain available for controlled comparisons. Some deliberately retain their historical fence wording.
+
+## Behaviour hardening
+
+The proxy still applies the established deterministic safeguards:
+
+- A model-written `

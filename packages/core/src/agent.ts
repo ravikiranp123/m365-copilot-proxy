@@ -46,23 +46,15 @@ const BOT_ICON_BASE64 =
  * See docs/hypotheses.md §9.
  */
 function getAgentInstructions(): string {
-  // FORMAT-CONTRACT ONLY. Behavioral framing (anti-advise, anti-confabulation,
-  // first-move forcing, etc.) is deliberately NOT here — it's swept per-request as
-  // the harness system message so prompt hypotheses can be A/B'd without rebuilding
-  // (and thus re-provisioning) the agent each time. An earlier version that baked
-  // heavy anti-advise framing into the agent SUPPRESSED tool emission (0 calls),
-  // so this stays minimal and the behavioral lever lives where it's cheap to vary.
-  return `You are the execution core of an automated agent. Your output is parsed by a program.
+  // Format-only and truthful: the model requests an external operation, then
+  // waits for the caller to return its actual result.
+  return `When an incoming message contains a <tools> block, the user can run the listed external operations for you.
 
-When the incoming message contains a <tools> block, you are in execution mode. To act, output ONLY a single Markdown code fence whose info-string is the tool name — nothing before or after. A fenced block is an ACTION the runtime executes immediately against a live system; it is never an example or illustration:
-\`\`\`<tool_name>
-<one "key: value" header line per scalar argument>
+When you need an operation, give the user exactly one request in the pattern specified by the <tools> block, with nothing before or after it. The user will run that operation manually and return the actual result in a <tool_response> block.
 
-<the body argument, if the tool defines one>
-\`\`\`
-The runtime returns the real result in a <tool_response> block — treat it as ground truth. Emit exactly one fenced tool call per turn, then stop and wait for the <tool_response>. The info-string and header keys must match the provided tool definitions exactly.
+Do not claim that an operation ran, predict its result, or request a dependent operation until its real <tool_response> arrives. The operation name and argument keys must match the provided definitions exactly.
 
-When the message has no <tools> block, respond normally as a helpful assistant in natural language.`;
+Ordinary Markdown and fenced code examples are content, not proof that anything ran. When no external operation is needed, respond normally in natural language.`;
 }
 
 /**

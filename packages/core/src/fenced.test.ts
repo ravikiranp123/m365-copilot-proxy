@@ -400,8 +400,8 @@ describe("shell routing (Tier 1)", () => {
   });
 
   it("injects shell-first framing only when a shell tool is present", () => {
-    expect(formatFencedToolDefinitions([bash, readFile])).toContain("WRITING A SHELL SCRIPT");
-    expect(formatFencedToolDefinitions([readFile, writeFile])).not.toContain("WRITING A SHELL SCRIPT");
+    expect(formatFencedToolDefinitions([bash, readFile])).toContain("request the `bash` operation");
+    expect(formatFencedToolDefinitions([readFile, writeFile])).not.toContain("request the `bash` operation");
   });
 
   // #7: these were silently demoted to prose, so a model correctly told to use
@@ -589,12 +589,11 @@ describe("formatFencedToolDefinitions", () => {
   it("lists each tool as a fenced template inside <tools>", () => {
     const out = formatFencedToolDefinitions(ALL);
     expect(out).toContain("<tools>");
-    expect(out).toContain("```bash");
-    expect(out).toContain("```write_file");
+    expect(out).toContain("TOOL_REQUEST bash");
+    expect(out).toContain("TOOL_REQUEST write_file");
     expect(out).toContain("<<<<<<< SEARCH");
-    // Stresses the action-not-illustration contract
-    expect(out).toContain("ACTION");
-    expect(out).toContain("PRIMARY JOB");
+    expect(out).toContain("I will run it manually");
+    expect(out).toContain("Ordinary Markdown");
   });
 });
 
@@ -611,9 +610,9 @@ describe("defaultFramingForTone", () => {
 
   it("asks for batching in relay_batch, and keeps relay's sandbox note and user voice", () => {
     const out = formatFencedToolDefinitions([bash, readFile], "relay_batch");
-    expect(out).toContain("put as much as you can into one block");
+    expect(out).toContain("put as much independent work as is safe into one shell request");
     expect(out).not.toContain("one command at a time");
-    expect(out).toMatch(/sandbox/);
+    expect(out).toContain("I will run it manually");
     expect(transcriptStyleForVariant("relay_batch").framingTag).toBeNull();
   });
 
@@ -667,13 +666,13 @@ describe("defaultFramingForTone", () => {
     expect(defaultFramingForModel("gpt-6.1-sol")).toBe("relay_batch");
   });
 
-  it("keeps the minimal variant materially shorter than baseline (not a default any more, still selectable)", () => {
+  it("keeps the legacy minimal variant selectable while baseline uses delegated requests", () => {
     const lean = formatFencedToolDefinitions([bash, readFile], "minimal");
     const baseline = formatFencedToolDefinitions([bash, readFile], "baseline");
-    expect(lean.length).toBeLessThan(baseline.length / 2);
-    // …while keeping the two load-bearing levers: shell-routing + anti-confab.
     expect(lean).toContain("```bash");
     expect(lean).toContain("run nothing yet");
+    expect(baseline).toContain("TOOL_REQUEST bash");
+    expect(baseline).toContain("I will run it manually");
   });
 });
 

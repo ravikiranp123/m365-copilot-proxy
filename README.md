@@ -13,23 +13,36 @@ M365 Copilot uses a SignalR WebSocket protocol, not the OpenAI API. This project
 
 ### Tool calling
 
-M365 Copilot doesn't support OpenAI-style `tool_calls` natively. Instead, tools are
-emulated via a **Markdown-fence format** (the JSON `{"tool":...}` format was removed —
-it scored 0/5 on real agentic tasks; see [hypotheses §9](docs/hypotheses.md)):
+M365 Copilot doesn't support OpenAI-style `tool_calls` natively. The proxy asks it
+for a collision-free delegated-operation envelope:
 
-- Tool definitions are injected into the prompt as fenced templates inside a `<tools>` block
-- The model emits a fenced tool call — a code block whose info-string is the tool name
-  (scalar args as `key: value` header lines, one free-form body arg as the fence body,
-  `old`/`new` edits as aider-style `SEARCH/REPLACE` diffs)
-- The proxy/handler parses that and converts it to OpenAI `tool_calls` format
-- **Shell-routing (the key lever):** M365's chat-tuned model won't "act as an agent" on
-  demand but *will* reflexively write a ```` ```bash ```` block. When the toolset includes a
-  shell tool (`bash`/`shell`/`run`/`run_command`/… — any name), the proxy injects "do the
-  whole step by writing one ```` ```bash ```` block" framing and routes that block to the
-  shell tool. This exploits the one agentic behavior Microsoft's system prompt permits, and
-  is what turns 0/5 into real multi-turn loops (verified 9-tool-call bug fix).
-- **Reliability comes from the Copilot Studio agent (below) + the fenced/shell framing** —
-  without the agent, M365 ignores tool instructions and answers in prose
+````text
+TOOL_REQUEST write_file
+path: README.md
+
+# Project
+
+Run:
+
+```bash
+pnpm install
+```
+````
+
+- `TOOL_REQUEST <known-tool>` must begin the response. Scalar arguments are `key: value`
+  headers; after the first blank line, a free-form body runs to EOF unchanged.
+- Markdown fences inside that body are file content, not nested actions. Without the
+  `TOOL_REQUEST` prefix, ordinary Markdown is returned as text.
+- The proxy converts a valid envelope to OpenAI `tool_calls` format.
+- **M365 compatibility:** the model's established natural action shape is a Markdown
+  tool fence, usually ```` ```bash ````. One recognised fence that occupies the entire
+  response is still accepted. A fence after prose, multiple fences, or fences embedded in
+  a document are content by default.
+- The older JSON `{"tool":...}` format is not prompted and is disabled by default; it
+  scored 0/5 on real agentic tasks (see [hypotheses §9](docs/hypotheses.md)).
+- **Reliability still comes from shell-routing and the model-specific relay framing.**
+  The delegated prompt retains the proven "wrong sandbox" guidance for Claude Sonnet and
+  GPT-6-family models while giving actions an unambiguous outer envelope.
 
 ### Agent mode
 
@@ -603,6 +616,8 @@ Three token scopes are acquired:
 | `M365_DUMP_FRAMES` | Set to `1` to write every WebSocket frame (both directions) to `~/.config/opencode-m365/frames/<requestId>.ndjson`. For offline diffing of new M365 fields. |
 | `M365_FRAME_DIR` | Frame dump directory, relative to `~/.config/opencode-m365/` (default `frames`; an absolute path is used as is). `M365_FRAME_DIR=my/frames` dumps to `~/.config/opencode-m365/my/frames/`. |
 | `M365_ALLOW_MULTI_TOOL` | Allow the model to emit multiple tool calls per turn (default: only the first is kept) |
+| `M365_ACCEPT_LEGACY_FENCES` | Set to `1` to accept the old permissive Markdown-fence parser, including calls with prose around them or multiple recognised fences. By default only one recognised fence occupying the whole response is accepted as M365 compatibility; embedded Markdown remains content. |
+| `M365_ACCEPT_LEGACY_JSON` | Set to `1` to parse the retired `{"tool":...,"arguments":...}` and fenced `tool_call` JSON shapes. Off by default because JSON examples in documents are ambiguous and the format scored 0/5 in the agentic benchmark. |
 | `M365_NO_EARLY_STOP` | Set to `1` to let a tool turn run to its end after the model starts writing its own `<tool_response>`. By default the proxy stops the turn once that invented tail passes `M365_EARLY_STOP_AFTER` chars (the invented part is cut either way), which saves minutes when the model invents the rest of the session (#65) |
 | `M365_EARLY_STOP_AFTER` | How many chars of a model-written `<tool_response>` tail a tool turn may run before the proxy stops it (default `2000`; `0` stops at the tag). M365 keeps a short tail in the conversation and the model seems to follow it: stopping at the tag cost Sonnet 4.6 10% more turns in real pi, the default none measurable ([hypotheses §35](docs/hypotheses.md)) |
 | `M365_INJECT_REPLY_TOOL` | Set to `1` to inject a synthetic `reply(text)` tool. Forces every turn to be a tool call, including pure-prose answers. Cleaner contract for the model, +1 tool to the prompt (watch the Disengaged threshold). Confirmed 5/5 compliance on June 9 2026 ([hypotheses §1.1](docs/hypotheses.md)). |
