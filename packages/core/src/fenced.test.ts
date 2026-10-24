@@ -137,6 +137,31 @@ describe("parseFencedToolCalls", () => {
     expect(args).toEqual({ path: "f.py", content });
   });
 
+  it("round-trips Markdown with longer fences and exact trailing whitespace", () => {
+    const content = "# Setup\n\n```bash\npnpm install\n```\n\n````text\nexample\n````\n  \n\n";
+    const rendered = renderFencedCall(deriveFencedSpec(writeFile), { path: "README.md", content });
+    expect(rendered.startsWith("`````write_file\n")).toBe(true);
+    expect(argsOf(rendered).args).toEqual({ path: "README.md", content });
+  });
+
+  it("accepts tilde fences without interpreting inner backticks as operations", () => {
+    const content = "# Setup\n```bash\necho example\n```";
+    const { calls, args } = argsOf("~~~~write_file\npath: README.md\n\n" + content + "\n~~~~");
+    expect(calls).toHaveLength(1);
+    expect(args).toEqual({ path: "README.md", content });
+  });
+
+  it("requires a matching marker and a sufficiently long closing fence", () => {
+    expect(argsOf("````bash\npwd\n```").calls).toHaveLength(0);
+    expect(argsOf("~~~~bash\npwd\n````").calls).toHaveLength(0);
+    expect(argsOf("````bash\npwd\n`````").args).toEqual({ command: "pwd" });
+  });
+
+  it("does not execute examples inside a longer document fence", () => {
+    const document = "````markdown\n# Example\n```bash\necho example\n```\n````";
+    expect(argsOf(document).calls).toHaveLength(0);
+  });
+
   it("round-trips an edit_file SEARCH/REPLACE", () => {
     const rendered = renderFencedCall(deriveFencedSpec(editFile), {
       path: "app.py",
@@ -589,11 +614,11 @@ describe("formatFencedToolDefinitions", () => {
   it("lists each tool as a fenced template inside <tools>", () => {
     const out = formatFencedToolDefinitions(ALL);
     expect(out).toContain("<tools>");
-    expect(out).toContain("TOOL_REQUEST bash");
-    expect(out).toContain("TOOL_REQUEST write_file");
+    expect(out).toContain("```bash");
+    expect(out).toContain("```write_file");
     expect(out).toContain("<<<<<<< SEARCH");
     expect(out).toContain("I will run it manually");
-    expect(out).toContain("Ordinary Markdown");
+    expect(out).toContain("Document detection is only a best-effort safeguard");
   });
 });
 
@@ -624,9 +649,14 @@ describe("defaultFramingForTone", () => {
   });
 
   it("leaves every other tone on the bench-tuned baseline", () => {
-    for (const tone of ["magic", "Claude_Sonnet_Reasoning", "Gpt_5_5_Reasoning", undefined]) {
+    for (const tone of ["magic", "Gpt_5_5_Reasoning", undefined]) {
       expect(defaultFramingForTone(tone)).toBeUndefined();
     }
+  });
+
+  it("gives Claude_Sonnet_Reasoning relay_batch — user voice without <system> tags", () => {
+    expect(defaultFramingForTone("Claude_Sonnet_Reasoning")).toBe("relay_batch");
+    expect(defaultFramingForModel("claude-sonnet-think-deeper")).toBe("relay_batch");
   });
 
   it("gives the Claude_Sonnet tone the <system>-free relay_batch (Sonnet 4.6, §25 F62)", () => {
@@ -671,7 +701,11 @@ describe("defaultFramingForTone", () => {
     const baseline = formatFencedToolDefinitions([bash, readFile], "baseline");
     expect(lean).toContain("```bash");
     expect(lean).toContain("run nothing yet");
-    expect(baseline).toContain("TOOL_REQUEST bash");
+    expect(baseline).toContain("```bash");
+    expect(baseline).toContain("not required for Markdown writes");
+    expect(baseline).toContain("outer backtick fence is longer");
+    expect(baseline).toContain("TOOL_REQUEST <tool_name>");
+    expect(baseline).toContain("before requesting another operation in a separate message");
     expect(baseline).toContain("I will run it manually");
   });
 });
@@ -700,7 +734,7 @@ describe("defaultFramingForModel", () => {
 
   it("falls through to the tone default for everything else", () => {
     expect(defaultFramingForModel("claude-opus")).toBe("relay_batch");
-    expect(defaultFramingForModel("claude-sonnet-think-deeper")).toBeUndefined(); // unmeasured: stays baseline
+    expect(defaultFramingForModel("claude-sonnet-think-deeper")).toBe("relay_batch");
     expect(defaultFramingForModel("m365-copilot")).toBeUndefined();
     expect(defaultFramingForModel("gpt-5.5-think-deeper")).toBeUndefined();
   });

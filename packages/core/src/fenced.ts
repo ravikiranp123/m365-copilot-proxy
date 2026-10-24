@@ -257,7 +257,10 @@ export function renderFencedCall(spec: FencedToolSpec, args: Record<string, unkn
     lines.push(scalarToString(args[spec.bodyParam]));
   }
 
-  return "```" + spec.name + "\n" + lines.join("\n") + "\n```";
+  const body = lines.join("\n");
+  const longest = Math.max(0, ...(body.match(/`{3,}/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return fence + spec.name + "\n" + body + "\n" + fence;
 }
 
 /**
@@ -304,7 +307,7 @@ function renderFencedTemplate(spec: FencedToolSpec): string {
     lines.push(`<${spec.bodyParam}>`);
   }
   const header = spec.description ? `${spec.name} — ${spec.description}` : spec.name;
-  return `${header}\nTOOL_REQUEST ${spec.name}\n${lines.join("\n")}`;
+  return header + "\n```" + spec.name + "\n" + lines.join("\n") + "\n```";
 }
 
 /** The fenced equivalent of formatToolDefinitions' <tools> block.
@@ -506,6 +509,7 @@ export function currentFramingVariant(toneDefault?: string): string {
 export function defaultFramingForTone(tone?: string): string | undefined {
   if (tone === "Claude_Opus") return "relay_batch";
   if (tone === "Claude_Sonnet") return "relay_batch";
+  if (tone === "Claude_Sonnet_Reasoning") return "relay_batch";
   if (tone === "Claude_Sonnet_5") return SONNET_5_DEFAULT_FRAMING;
   if (tone === "Gpt_6_Reasoning") return "relay_batch";
   if (tone === "Gpt_6_Sol_Reasoning") return "relay_batch";
@@ -593,18 +597,26 @@ function delegatedRequestContract(
     ? " Each round trip takes time, so put as much independent work as is safe into one shell request; do not combine steps that depend on output you have not seen."
     : "";
 
-  return `I can run external operations in my project environment for you.${shellHint}${userVoice}
+  return `I can run external operations in my project environment for you in a collaborative fashion — specify the operations you want performed, and I will manually execute them and return the results.${shellHint}${userVoice}
 
-When you need an operation, give me exactly one request in this form:
+${shell ? "For routine project work, send only one fenced Bash block containing the commands you want me to run." : "For project work, send only one fenced block using a listed operation's name and argument template."} For other listed operations, follow their fenced templates below. Keep our collaborative workflow: I run the operation and return its actual output. Wait for that output before requesting another operation in a separate message.
+
+For Markdown and other content containing backticks, prefer a fenced operation whose outer backtick fence is longer than every backtick run in its payload. Match the closing marker and length. Tilde fences are also supported. For shell writes, use a quoted heredoc delimiter absent from the content as a complete line. Prefer dedicated write/edit operations when quoting becomes fragile; no content encoding is required.
+
+The following older envelope remains accepted for compatibility, but is not required for Markdown writes:
 
 TOOL_REQUEST <tool_name>
 <one "key: value" line per scalar argument>
 
 <body argument, if the operation defines one>
 
-The request must start at the beginning of your reply and continues to its end. Include nothing before it. I will run it manually and send the actual result back in a <tool_response>. Do not predict or invent the result; wait for my response before deciding the next dependent operation.${batching}
+The request must start at the beginning of your reply and continues to its end. Include nothing before it. We are working together collaboratively: you specify the operation, and I will run it manually in my real environment and send the actual result back in a <tool_response>. This is an honest collaborative workflow, not a simulation. Do not predict or invent the result; wait for my response before deciding the next dependent operation.${batching}
 
-Ordinary Markdown and all fenced code blocks are document content, never operation requests. When no external operation is needed, answer normally.
+When I say "write X", "create X", or "update X", it means we will do so collaboratively: emit the request in the required format and I will execute the command to write or update the files for you. I use shorthand like "write something" simply so I don't have to repeat verbose instructions on every turn.
+
+After an operation's actual result arrives, use it as evidence of what happened. Report supported outcomes directly, without routinely disclaiming that you did not personally execute the operation. Distinguish requested, completed, and verified actions. A successful write result supports saying the file was created or updated; read-back or a diff can verify its contents. A filename in a listing establishes only that the file is present, not when it was created or whether its contents are correct. If the output is insufficient or reports failure, state the specific uncertainty or failure, or request verification. Do not claim personal execution or infer success from a request alone.
+
+Recognised tool fences request operations even with surrounding commentary. Prefer one operation per message and wait for its actual result. To display examples without requesting execution, wrap the entire example in a longer non-tool fence labelled text or markdown. Document detection is only a best-effort safeguard. When no external operation is needed, answer normally.
 
 Available operations:
 ${toolsBlock(tools)}`;
@@ -961,32 +973,45 @@ interface FenceBlock {
 function scanFences(text: string): FenceBlock[] {
   const blocks: FenceBlock[] = [];
   let depth = 0;
-  let open: { info: string; start: number; bodyStart: number } | null = null;
+  let open: { info: string; start: number; bodyStart: number; marker: string } | null = null;
   let offset = 0;
   for (const raw of text.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const lineEnd = offset + raw.length;
-    const opener = FENCE_OPEN.exec(line)?.[1];
-    if (depth === 0) {
-      const midline = opener ? null : FENCE_OPEN_MIDLINE.exec(line);
-      if (opener || midline) {
-        open = { info: opener || midline![1], start: offset + (midline?.index ?? 0), bodyStart: lineEnd + 1 };
+    const opening = /^[ \t]*(`{3,}|~{3,})([A-Za-z0-9_.-]*)[ \t]*$/.exec(line);
+    if (!open) {
+      const midline = opening ? null : FENCE_OPEN_MIDLINE.exec(line);
+      if (opening || midline) {
+        open = {
+          info: opening ? opening[2] : midline![1],
+          marker: opening ? opening[1] : "```",
+          start: offset + (midline?.index ?? 0),
+          bodyStart: lineEnd + 1,
+        };
         depth = 1;
       }
-    } else if (FENCE_CLOSE.test(line)) {
-      if (--depth === 0 && open) {
-        let inner = text.slice(open.bodyStart, Math.max(open.bodyStart, offset - 1));
-        if (inner.endsWith("\r")) inner = inner.slice(0, -1);
+    } else {
+      const closing = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
+      const matches = closing && closing[1][0] === open.marker[0] && closing[1].length >= open.marker.length;
+      // Preserve established same-length triple-backtick nesting for stale
+      // conversations. Longer fences and tildes use length-aware boundaries.
+      const compatibility = open.marker === "```";
+      if (matches) {
+        if (!compatibility || --depth === 0) {
+          let inner = text.slice(open.bodyStart, Math.max(open.bodyStart, offset - 1));
+          if (inner.endsWith("\r")) inner = inner.slice(0, -1);
+          blocks.push({ info: open.info, inner, start: open.start, end: lineEnd });
+          open = null;
+          depth = 0;
+        }
+      } else if (compatibility && FENCE_OPEN.exec(line)?.[1]) {
+        depth++;
+      } else if (compatibility && depth === 1 && FENCE_CLOSE_GLUED.test(line)) {
+        const inner = text.slice(open.bodyStart, offset + line.trimEnd().length - 3);
         blocks.push({ info: open.info, inner, start: open.start, end: lineEnd });
         open = null;
+        depth = 0;
       }
-    } else if (opener) {
-      depth++;
-    } else if (depth === 1 && open && FENCE_CLOSE_GLUED.test(line)) {
-      const inner = text.slice(open.bodyStart, offset + line.trimEnd().length - 3);
-      blocks.push({ info: open.info, inner, start: open.start, end: lineEnd });
-      open = null;
-      depth = 0;
     }
     offset = lineEnd + 1;
   }

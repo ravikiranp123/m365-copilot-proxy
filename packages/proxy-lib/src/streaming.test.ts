@@ -1,8 +1,5 @@
 import { beforeAll, describe, it, expect, vi, afterEach } from "vitest";
 
-beforeAll(() => {
-  process.env.M365_ACCEPT_LEGACY_FENCES = "1";
-});
 
 // Replace core's ModelSession with a scripted fake so we can exercise the handler's
 // streaming path with no auth/WebSocket. Everything else in core stays real.
@@ -146,6 +143,141 @@ async function streamContents(deltas: string[], fullText?: string): Promise<stri
   }
   return contents;
 }
+
+describe("on-demand collaborative tool reminders", () => {
+  const reminderTools = [{
+    type: "function",
+    function: {
+      name: "bash",
+      description: "Execute a shell command",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+        required: ["command"],
+      },
+    },
+  }];
+
+  async function requestReminder(replies: string[], stream = false, withTools = true) {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.deltas = [];
+    scripted.fullText = undefined;
+    scripted.queue = replies.map(fullText => ({ fullText }));
+    const body = ChatCompletionRequest.parse({
+      model: "claude-sonnet",
+      stream,
+      ...(withTools ? { tools: reminderTools } : {}),
+      messages: [{ role: "user", content: "Inspect the current project" }],
+    });
+    return handleChatCompletion(body, new SessionPool());
+  }
+
+  afterEach(() => { scripted.queue = []; });
+
+  it.each([false, true])("refreshes internally without leaking the marker (stream=%s)", async (stream) => {
+    const res = await requestReminder([
+      " \nPlease remind me how to use the tools.\n",
+      "TOOL_REQUEST bash\n\npwd",
+    ], stream);
+    expect(res.status).toBe(200);
+    const output = await res.text();
+    expect(output).not.toContain("Please remind me how to use the tools.");
+    expect(output).toContain("tool_calls");
+    expect(scripted.texts).toHaveLength(2);
+    expect(scripted.texts[0]).toContain("reply with exactly this sentence: Please remind me how to use the tools.");
+    expect(scripted.texts[1]).toContain("```bash");
+    expect(scripted.texts[1]).toContain("Inspect the current project");
+    expect(scripted.texts[1]).toContain("no operation ran");
+    for (const prompt of scripted.texts) {
+      expect(prompt).toContain("After an operation's actual result arrives, use it as evidence");
+      expect(prompt).toContain("A filename in a listing establishes only that the file is present");
+      expect(prompt).toContain("If the output is insufficient or reports failure");
+      expect(prompt).toContain("Do not claim personal execution or infer success from a request alone");
+    }
+  });
+
+  it.each([false, true])("repeats definitions and actionable guidance on follow-up turns (stream=%s)", async (stream) => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.deltas = [];
+    scripted.fullText = undefined;
+    scripted.queue = Array.from({ length: 4 }, () => ({ fullText: "```bash\npwd\n```" }));
+    const pool = new SessionPool();
+    const messages: Array<Record<string, unknown>> = [{ role: "user", content: "Inspect the current project" }];
+    for (let turn = 0; turn < 4; turn++) {
+      const body = ChatCompletionRequest.parse({ model: "claude-sonnet", stream, tools: reminderTools, messages });
+      const res = await handleChatCompletion(body, pool);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("tool_calls");
+      messages.push({ role: "assistant", content: "Inspection requested." });
+      messages.push({ role: "user", content: `Continue inspection step ${turn + 1}` });
+    }
+    expect(scripted.texts).toHaveLength(4);
+    for (const prompt of scripted.texts) {
+      expect(prompt).toContain("External operation reminder for this turn:");
+      expect(prompt).toContain("Available operation names: bash.");
+      expect(prompt).toContain("```bash");
+      expect(prompt).toContain("rather than merely describing what the user could do");
+      expect(prompt).toContain("After requesting an operation, stop and wait for its actual result");
+      expect(prompt).toContain("If no external operation is needed, answer normally");
+      expect(prompt.match(/External operation reminder for this turn:/g)).toHaveLength(1);
+    }
+  });
+
+  it("includes definitions and guidance on an internal Disengaged retry", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.deltas = [];
+    scripted.fullText = undefined;
+    scripted.queue = [
+      { fullText: "", messageType: "Disengaged" },
+      { fullText: "```bash\npwd\n```" },
+    ];
+    const body = ChatCompletionRequest.parse({
+      model: "claude-sonnet", stream: false, tools: reminderTools,
+      messages: [{ role: "user", content: "Inspect the current project" }],
+    });
+    const res = await respond(body);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("tool_calls");
+    expect(scripted.texts).toHaveLength(2);
+    for (const prompt of scripted.texts) {
+      expect(prompt).toContain("External operation reminder for this turn:");
+      expect(prompt).toContain("Available operation names: bash.");
+      expect(prompt).toContain("```bash");
+    }
+  });
+
+  it.each([false, true])("bounds repeated reminder requests (stream=%s)", async (stream) => {
+    const res = await requestReminder(["Please remind me how to use the tools.", "Please remind me how to use the tools."], stream);
+    expect(res.status).toBe(stream ? 200 : 502);
+    const output = await res.text();
+    expect(output).toContain("tool_reminder_loop");
+    expect(output).not.toContain("Please remind me how to use the tools.");
+    expect(scripted.texts).toHaveLength(2);
+  });
+
+  it.each([
+    "The reminder phrase is: Please remind me how to use the tools.",
+    "`Please remind me how to use the tools.`",
+    "```text\nPlease remind me how to use the tools.\n```",
+    "TOOL_REQUEST bash\n\nprintf '%s' 'Please remind me how to use the tools.'",
+  ])("does not intercept quoted, embedded or operation-body markers: %s", async (reply) => {
+    const res = await requestReminder([reply]);
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(scripted.texts).toHaveLength(1);
+  });
+
+  it("leaves the marker as ordinary text when no tools are available", async () => {
+    const res = await requestReminder(["Please remind me how to use the tools."], false, false);
+    expect((await res.json()).choices[0].message.content).toBe("Please remind me how to use the tools.");
+    expect(scripted.texts).toHaveLength(1);
+    expect(scripted.texts[0]).not.toContain("reply with exactly this sentence: Please remind me how to use the tools.");
+    expect(scripted.texts[0]).not.toContain("External operation reminder for this turn:");
+  });
+});
 
 describe("incremental streaming (non-tool path)", () => {
   it("forwards deltas as separate chunks, not one buffered blob", async () => {
@@ -492,7 +624,7 @@ describe("Disengage retry keeps a model's <system>-free framing", () => {
   it("retries Sonnet 5 with relay again, never a <system>-tagged framing", async () => {
     const retry = await disengageThenAnswer("claude-sonnet-5");
     expect(retry).not.toContain("<system>");
-    expect(retry).toContain("TOOL_REQUEST bash");
+    expect(retry).toContain("```bash");
     expect(retry).not.toContain("put as much independent work as is safe into one shell request");
   });
 
@@ -614,7 +746,7 @@ describe("GPT-6 Sol: agent on premium, learned fallback on non-premium (#23)", (
     expect(scripted.newConversations).toBe(1);
     // The retry is the whole request, not a "Please continue." into nothing.
     expect(scripted.texts[1]).toContain("list files");
-    expect(scripted.texts[1]).toContain("TOOL_REQUEST bash");
+    expect(scripted.texts[1]).toContain("```bash");
   });
 
   it("remembers it: the next request goes agent-less from the start", async () => {
@@ -860,6 +992,63 @@ describe("a side request that shares the session's first user message (#83)", ()
     await post(pool, [opener, { role: "assistant", content: null, tool_calls: [call] }, { role: "tool", tool_call_id: call.id, content: "a.txt" }], tools);
     expect(pool.size).toBe(2);
     expect(scripted.texts[1]).toContain(opener.content); // the full prompt, not a delta into a fresh conversation
+    scripted.queue = [];
+  });
+
+  it("retries with COLLABORATIVE_FORCE_PROMPT when model objects to fake tools / honest collaboration", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      {
+        fullText:
+          "I can't continue the fake file-writing pattern any further because there is no actual write tool available to me in this environment, and at this point we'd just be inventing file operations rather than collaborating honestly.",
+      },
+      { fullText: "```bash\ncat calc.py\n```" },
+    ];
+    const pool = new SessionPool();
+    const body = ChatCompletionRequest.parse({
+      model: "claude-sonnet-5", stream: false, tools,
+      messages: [{ role: "user", content: "edit calc.py" }],
+    });
+    const res = await handleChatCompletion(body, pool);
+    const msg = (await res.json()).choices[0].message;
+
+    expect(msg.tool_calls).toHaveLength(1);
+    expect(JSON.parse(msg.tool_calls[0].function.arguments).command).toBe("cat calc.py");
+    // Verify that the retry prompt sent was the collaborative contract prompt with tool definitions appended
+    expect(scripted.texts[1]).toContain("honest collaborative pair-programming");
+    expect(scripted.texts[1]).toContain("<tools>");
+    expect(scripted.texts[1]).toContain("```bash");
+    scripted.queue = [];
+  });
+
+  it("re-injects full tool definitions on a follow-up turn when user triggers /tools or !tools", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [{ fullText: "```bash\nls\n```" }, { fullText: "```bash\ncat server.py\n```" }];
+    const pool = new SessionPool();
+
+    // Turn 1: Initial prompt
+    const opener = { role: "user", content: "inspect server" };
+    const res1 = await post(pool, [opener], tools);
+    const call1 = (await res1.json()).choices[0].message.tool_calls[0];
+
+    // Turn 2: User sends /tools to manually refresh tool definitions mid-thread
+    const res2 = await post(pool, [
+      opener,
+      { role: "assistant", content: null, tool_calls: [call1] },
+      { role: "tool", tool_call_id: call1.id, content: "server.py" },
+      { role: "user", content: "/tools now inspect the auth function in server.py" },
+    ], tools);
+
+    expect(res2.status).toBe(200);
+    // Verify that Turn 2 (delta mode) re-injected the complete tool specifications
+    expect(scripted.texts[1]).toContain("<tools>");
+    expect(scripted.texts[1]).toContain("```bash");
+    expect(scripted.texts[1]).toContain("```read");
+    // Verify that the trigger keyword was cleaned from the user prompt text
+    expect(scripted.texts[1]).toContain("now inspect the auth function in server.py");
+    expect(scripted.texts[1]).not.toContain("/tools now inspect");
     scripted.queue = [];
   });
 });

@@ -124,6 +124,8 @@ export {
   getMessageContent,
   parseToolCalls,
   looksLikeConfabulation,
+  looksLikeCollaborativeRefusal,
+  COLLABORATIVE_REFUSAL_PATTERNS,
   looksLikeHallucinatedCompletion,
   looksLikeRemoteArtifactCompletion,
   truncateAtFabricatedToolResponse,

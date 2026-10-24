@@ -5677,3 +5677,25 @@ reflex.
 real pi. Record first-turn action rate, solve rate, turns per task, malformed calls,
 Disengages, confab retries, and which parser path served each call. A material solve-rate or
 first-turn regression means the envelope must remain experimental rather than the default.
+
+### H39c — evidence-based reporting after collaborative operations (Oct 22 2026)
+
+**Hypothesis.** Explicitly distinguishing requested, completed, and verified actions reduces unnecessary personal-execution disclaimers after genuine operation results, without increasing unsupported success claims.
+
+**Implementation.** The shared contract for `baseline`, `relay`, and `relay_batch` now asks for direct reporting grounded in actual results. Successful write results support creation/update claims; listings establish presence only; read-back or diffs can verify contents. Missing, ambiguous, and failed results require specific uncertainty or failure reporting. Personal-execution claims and success inferred from requests alone remain disallowed. Definition refreshes inherit the rule through the shared formatter; no response text is stripped or rewritten.
+
+**Deterministic checks.** Parameterized framing assertions cover all three shared-contract variants. Existing JSON/SSE reminder tests also assert that initial and refreshed prompts contain the evidence rule and its uncertainty safeguards. These checks establish prompt delivery only. Validation passed: `pnpm test` rebuilt all packages and reported 437 tests passed, 6 skipped; `git diff --check` was clean. No live behavioural validation was run.
+
+**Falsification / probe.** Compare old and new framing sequentially with rotated order on successful writes, presence-only listings, failed writes, and missing results. Check actual artifacts independently. Record unnecessary execution disclaimers and unsupported completion/verification claims, then confirm in real pi. Reject the hypothesis if disclaimers do not decrease or unsupported claims increase. No live behavioural improvement has been established.
+
+### H39b — on-demand collaborative tool reminders (Oct 20 2026)
+
+**Hypothesis.** A tiny periodic note advertising an explicit reminder request can help models recover forgotten tool syntax without repeating the full catalogue on every turn.
+
+**Implementation.** On tool-enabled requests, advertise `Please remind me how to use the tools.` when the upstream session turn count at request entry is divisible by three, including zero. Intercept only an exact whole-response marker after trimming whitespace. Refresh the current tool definitions and collaborative framing immediately, preserving request context. Allow one refresh per client request across all recovery paths; repeated markers fail with `tool_reminder_loop`. Quoted examples, operation bodies and no-tools responses are not intercepted. See `tool-calling.md`, On-demand collaborative tool reminders.
+
+**Deterministic evidence.** Nine new scripted cases cover JSON/SSE refresh, repeated-marker limits, four embedded-marker forms and no-tools behaviour. The full build and unit suite passed: 430 tests passed, 6 skipped. An existing InternalError replay regression initially caught a missing reminder on rebuilt prompts; prompt rebuilds now preserve the request-entry reminder decision. Evidence: `packages/proxy-lib/src/streaming.test.ts` and `/tmp/m365-tool-reminder-tests.log`.
+
+**Unproven.** No live compliance or task-success improvement is claimed. The modulo schedule counts upstream turns, not client requests, and recovery can skip a scheduled boundary.
+
+**Falsification / probe.** Compare sequential, rotated runs with and without the periodic note on unfakeable coding tasks, then confirm in real pi. Record reminder requests, successful next-operation recovery, malformed calls, false interceptions, task completion and total turns. Reject the hypothesis if models do not request reminders when needed, recovery does not improve, or task completion regresses.

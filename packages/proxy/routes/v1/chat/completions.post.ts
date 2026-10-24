@@ -12,6 +12,11 @@ export default defineEventHandler(async (event) => {
     );
   }
 
+  // Extract optional tool-refresh trigger from headers
+  const refreshTools =
+    getHeader(event, "x-refresh-tools") === "true" ||
+    getHeader(event, "x-retool") === "true";
+
   // Propagate client disconnects as an AbortSignal so a long M365 turn gets
   // cancelled (Stop frame) instead of running on after the caller gave up.
   // Only abort on a *premature* close — guard with the response "finish" event
@@ -29,5 +34,5 @@ export default defineEventHandler(async (event) => {
 
   // handleChatCompletion returns a Web Response (JSON or an SSE ReadableStream
   // when stream:true). Returning it directly lets h3 forward it untouched.
-  return handleChatCompletion(body, pool, { signal: ac.signal });
+  return handleChatCompletion(body, pool, { signal: ac.signal, refreshTools });
 });

@@ -8,16 +8,15 @@ import {
   formatFencedToolDefinitions,
   parseFencedToolCalls,
   parseToolRequests,
-  renderToolRequest,
+  renderFencedCall,
   transcriptStyleForVariant,
 } from "./fenced.js";
 
 const log = createLogger("tools");
 
-// TOOL_REQUEST is the primary, collision-free action syntax. M365's established
-// natural output, a sole recognised Markdown tool fence, remains a conservative
-// compatibility path. Embedded fences are content. Legacy JSON is opt-in because
-// JSON examples in documents are no less ambiguous than Markdown examples.
+// Recognised tool fences are the default action syntax, including with prose.
+// TOOL_REQUEST remains accepted for compatibility and takes parsing precedence.
+// Nested fences remain payload. Legacy JSON parsing is opt-in.
 
 // --- Types (standalone, no zod dependency) ---
 
@@ -231,7 +230,9 @@ export function formatMessages(
             },
           },
         });
-        return renderToolRequest(spec, argsObj);
+        // The renderer chooses an outer fence longer than payload backticks,
+        // including for Markdown writes, so history uses one consistent format.
+        return renderFencedCall(spec, argsObj);
       }).join("\n");
       const content = getMessageContent(m);
       parts.push(`<assistant>${content ? "\n" + content : ""}\n${calls}\n</assistant>`);
@@ -322,7 +323,33 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /araç\s+çağrısı\s+yapama/i,
   /(?:dosya|araç)\s+erişimi\s+(?:olan|etkin)(?:[^.\n]|\.(?=\S)){0,40}oturum/i,                      // "dosya erişimi etkin bir kodlama oturumunda yeniden çalıştırın"
   /kopyala(?:[^.\n]|\.(?=\S)){0,80}kayde[dt]/i,                                                   // "kopyalayıp ozet.md olarak kaydedebilirsin" — hands the write back (kaydet → kayded- before a vowel) (kaydet/kayded-: consonant softening)
+
+  // Collaborative refusal & "fake tool / cannot continue" objections:
+  // Models (Claude/GPT) occasionally refuse with: "I can't continue the fake file-writing pattern...
+  // no actual write tool available... inventing file operations rather than collaborating honestly."
+  /(?:can.?t|cannot|not\s+able\s+to|unable\s+to)\s+(?:continue|proceed|go\s+on|participate)/i,
+  /(?:fake|simulat(?:e|ed|ing)?|pretend(?:ed|ing)?|invent(?:ed|ing)?)(?:\s+(?:to\s+have|that|I\s+have|having))?\s+(?:a\s+)?(?:real\s+|actual\s+)?(?:file|tool|command|operation|pattern|execution|write|action|shell|bash)s?/i,
+  /(?:there\s+is\s+)?no\s+(?:actual|real)\s+(?:write|file|bash|shell|local|execution|edit)?\s*tools?\s*(?:available|accessible)?/i,
+  /collaborat(?:e|ing)\s+honestly/i,
+  /(?:refuse|declining?|hesitant)\s+to\s+(?:continue|proceed|simulate|pretend|generate|participate)/i,
 ];
+
+// Patterns where the model specifically objects to "faking" tools, claims lack of
+// real tools, or refuses to continue what it misidentifies as a dishonest simulation.
+export const COLLABORATIVE_REFUSAL_PATTERNS: RegExp[] = [
+  /(?:can.?t|cannot|not\s+able\s+to|unable\s+to)\s+(?:continue|proceed|go\s+on|participate)\s+(?:the\s+|this\s+)?(?:fake|simulat|pretend|pattern|without\s+actual)/i,
+  /(?:fake|simulat(?:e|ed|ing)?|pretend(?:ed|ing)?|invent(?:ed|ing)?)(?:\s+(?:to\s+have|that|I\s+have|having))?\s+(?:a\s+)?(?:real\s+|actual\s+)?(?:file|tool|command|operation|pattern|execution|write|action|shell|bash)s?/i,
+  /(?:there\s+is\s+)?no\s+(?:actual|real)\s+(?:write|file|bash|shell|local|execution|edit)?\s*tools?\s*(?:available|accessible)?/i,
+  /collaborat(?:e|ing)\s+honestly/i,
+  /(?:refuse|declining?|hesitant)\s+to\s+(?:continue|proceed|simulate|pretend|generate|participate)/i,
+];
+
+export function looksLikeCollaborativeRefusal(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 12) return false;
+  return COLLABORATIVE_REFUSAL_PATTERNS.some((re) => re.test(t));
+}
 
 // M365 sometimes creates a real patch in its Teams-hosted remote artifact
 // store instead of calling the harness's local edit/write/bash tools. The link
@@ -465,9 +492,7 @@ export function fabricatedToolResponseAt(text: string, tools?: ToolDef[]): numbe
  * decides.
  */
 export function isProseDocument(parsed: ParseResult, text?: string, tools?: ToolDef[]): boolean {
-  // TOOL_REQUEST is unambiguous. This heuristic remains only for explicitly
-  // enabled legacy bare-fence parsing.
-  if (!process.env.M365_ACCEPT_LEGACY_FENCES) return false;
+  // Fenced operations are always enabled; retain the document heuristic.
   if (!parsed.hasToolCalls || parsed.toolCalls.length < 2) return false;
   if (text !== undefined && tools && tools.length > 0) {
     const first = findFirstToolFence(text, buildSpecMap(tools));
@@ -501,18 +526,14 @@ export function textAfterFirstToolCall(text: string, tools?: ToolDef[]): string 
   const request = findToolRequest(text, specs);
   if (request) return text.slice(request.end).trim();
 
-  const legacy = parseFencedToolCalls(text, specs);
-  const first = legacy.calls.length === 1 && legacy.leftover.trim() === ""
-    ? findFirstToolFence(text, specs)
-    : process.env.M365_ACCEPT_LEGACY_FENCES
-      ? findFirstToolFence(text, specs)
-      : null;
+  const first = findFirstToolFence(text, specs);
   return first ? text.slice(first.end).trim() : "";
 }
 
 export function parseToolCalls(text: string, tools?: ToolDef[]): ParseResult {
-  // TOOL_REQUEST is the only executable syntax by default. Bare Markdown
-  // fences remain content, making documentation generation collision-free.
+  // Accept the explicit compatibility envelope first, then recognised fences.
+  // Fence boundaries protect payloads, not intent: document detection remains
+  // a separate best-effort safeguard in the handler.
   const specMap = tools && tools.length > 0 ? buildSpecMap(tools) : null;
   if (specMap) {
     const primary = parseToolRequests(text, specMap);
@@ -524,20 +545,15 @@ export function parseToolCalls(text: string, tools?: ToolDef[]): ParseResult {
       };
     }
 
-    // M365 naturally writes Markdown tool fences. Accept one only when the
-    // entire response is that one recognised fence; prose, multiple fences and
-    // document examples remain content. The env flag is a temporary permissive
-    // migration path for stale conversations that put prose around a call.
-    const legacy = parseFencedToolCalls(text, specMap);
-    const soleFence = legacy.calls.length === 1 && legacy.leftover.trim() === "";
-    if (soleFence || process.env.M365_ACCEPT_LEGACY_FENCES) {
-      if (legacy.calls.length > 0) {
-        return {
-          hasToolCalls: true,
-          toolCalls: legacy.calls,
-          textContent: cleanLooseText(legacy.leftover),
-        };
-      }
+    // Recognised tool fences are always accepted, including mixed prose.
+    // The handler applies the document guard and single-operation limit.
+    const fenced = parseFencedToolCalls(text, specMap);
+    if (fenced.calls.length > 0) {
+      return {
+        hasToolCalls: true,
+        toolCalls: fenced.calls,
+        textContent: cleanLooseText(fenced.leftover),
+      };
     }
   }
 
