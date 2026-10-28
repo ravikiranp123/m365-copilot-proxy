@@ -8,7 +8,7 @@ import {
   formatFencedToolDefinitions,
   parseFencedToolCalls,
   parseToolRequests,
-  renderFencedCall,
+  renderToolRequest,
   transcriptStyleForVariant,
 } from "./fenced.js";
 
@@ -230,9 +230,9 @@ export function formatMessages(
             },
           },
         });
-        // The renderer chooses an outer fence longer than payload backticks,
-        // including for Markdown writes, so history uses one consistent format.
-        return renderFencedCall(spec, argsObj);
+        // History renders the TOOL_REQUEST envelope so the model sees only
+        // syntax that remains executable in this contract.
+        return renderToolRequest(spec, argsObj);
       }).join("\n");
       const content = getMessageContent(m);
       parts.push(`<assistant>${content ? "\n" + content : ""}\n${calls}\n</assistant>`);
@@ -492,7 +492,9 @@ export function fabricatedToolResponseAt(text: string, tools?: ToolDef[]): numbe
  * decides.
  */
 export function isProseDocument(parsed: ParseResult, text?: string, tools?: ToolDef[]): boolean {
-  // Fenced operations are always enabled; retain the document heuristic.
+  // TOOL_REQUEST is unambiguous. This heuristic remains only for explicitly
+  // enabled legacy bare-fence parsing.
+  if (!process.env.M365_ACCEPT_LEGACY_FENCES) return false;
   if (!parsed.hasToolCalls || parsed.toolCalls.length < 2) return false;
   if (text !== undefined && tools && tools.length > 0) {
     const first = findFirstToolFence(text, buildSpecMap(tools));
@@ -526,14 +528,18 @@ export function textAfterFirstToolCall(text: string, tools?: ToolDef[]): string 
   const request = findToolRequest(text, specs);
   if (request) return text.slice(request.end).trim();
 
-  const first = findFirstToolFence(text, specs);
+  const legacy = parseFencedToolCalls(text, specs);
+  const first = legacy.calls.length === 1 && legacy.leftover.trim() === ""
+    ? findFirstToolFence(text, specs)
+    : process.env.M365_ACCEPT_LEGACY_FENCES
+      ? findFirstToolFence(text, specs)
+      : null;
   return first ? text.slice(first.end).trim() : "";
 }
 
 export function parseToolCalls(text: string, tools?: ToolDef[]): ParseResult {
-  // Accept the explicit compatibility envelope first, then recognised fences.
-  // Fence boundaries protect payloads, not intent: document detection remains
-  // a separate best-effort safeguard in the handler.
+  // TOOL_REQUEST is the only executable syntax by default. Bare Markdown
+  // fences remain content, making documentation generation collision-free.
   const specMap = tools && tools.length > 0 ? buildSpecMap(tools) : null;
   if (specMap) {
     const primary = parseToolRequests(text, specMap);
@@ -545,15 +551,20 @@ export function parseToolCalls(text: string, tools?: ToolDef[]): ParseResult {
       };
     }
 
-    // Recognised tool fences are always accepted, including mixed prose.
-    // The handler applies the document guard and single-operation limit.
-    const fenced = parseFencedToolCalls(text, specMap);
-    if (fenced.calls.length > 0) {
-      return {
-        hasToolCalls: true,
-        toolCalls: fenced.calls,
-        textContent: cleanLooseText(fenced.leftover),
-      };
+    // M365 naturally writes Markdown tool fences. Accept one only when the
+    // entire response is that one recognised fence; prose, multiple fences and
+    // document examples remain content. The env flag is a temporary permissive
+    // migration path for stale conversations that put prose around a call.
+    const legacy = parseFencedToolCalls(text, specMap);
+    const soleFence = legacy.calls.length === 1 && legacy.leftover.trim() === "";
+    if (soleFence || process.env.M365_ACCEPT_LEGACY_FENCES) {
+      if (legacy.calls.length > 0) {
+        return {
+          hasToolCalls: true,
+          toolCalls: legacy.calls,
+          textContent: cleanLooseText(legacy.leftover),
+        };
+      }
     }
   }
 

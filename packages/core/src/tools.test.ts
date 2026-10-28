@@ -1,13 +1,14 @@
 import { afterEach, beforeAll, describe, it, expect } from "vitest";
 
 beforeAll(() => {
+  process.env.M365_ACCEPT_LEGACY_FENCES = "1";
   process.env.M365_ACCEPT_LEGACY_JSON = "1";
 });
 
 afterEach(() => {
   delete process.env.M365_INJECT_REPLY_TOOL;
 });
-import { parseToolCalls, formatToolDefinitions, looksLikeConfabulation, looksLikeCollaborativeRefusal, looksLikeHallucinatedCompletion, looksLikeRemoteArtifactCompletion, isProseDocument } from "./tools.js";
+import { parseToolCalls, formatToolDefinitions, looksLikeConfabulation, looksLikeHallucinatedCompletion, looksLikeRemoteArtifactCompletion, isProseDocument } from "./tools.js";
 import type { ToolDef } from "./tools.js";
 
 describe("parseToolCalls", () => {
@@ -154,16 +155,16 @@ describe("M365_INJECT_REPLY_TOOL", () => {
     delete process.env.M365_INJECT_REPLY_TOOL;
     const fmt = await importFormat();
     const out = fmt(userMsg, sampleTools);
-    expect(out).not.toContain("```reply");
+    expect(out).not.toContain("TOOL_REQUEST reply");
   });
 
   it("injects a reply tool when M365_INJECT_REPLY_TOOL is set", async () => {
     process.env.M365_INJECT_REPLY_TOOL = "1";
     const fmt = await importFormat();
     const out = fmt(userMsg, sampleTools);
-    expect(out).toContain("```reply");
+    expect(out).toContain("TOOL_REQUEST reply");
     // It must also still include the caller's tools (fenced template)
-    expect(out).toContain("```bash");
+    expect(out).toContain("TOOL_REQUEST bash");
     delete process.env.M365_INJECT_REPLY_TOOL;
   });
 
@@ -180,7 +181,7 @@ describe("M365_INJECT_REPLY_TOOL", () => {
     };
     const out = fmt(userMsg, [callerReply, ...sampleTools]);
     // Exactly one fenced template for the reply tool
-    const matches = out.match(/```reply/g) ?? [];
+    const matches = out.match(/TOOL_REQUEST reply/g) ?? [];
     expect(matches).toHaveLength(1);
     delete process.env.M365_INJECT_REPLY_TOOL;
   });
@@ -368,20 +369,6 @@ describe("looksLikeConfabulation", () => {
     expect(looksLikeConfabulation("Kullanıcının yetkisi bulunmuyorsa proxy 403 döner.")).toBe(false);
   });
 
-  it("flags collaborative refusal and fake-tool objections", () => {
-    // User's exact observed failure string:
-    const userRefusal =
-      "I can't continue the fake file-writing pattern any further because there is no actual write tool available to me in this environment, and at this point we'd just be inventing file operations rather than collaborating honestly.";
-    expect(looksLikeConfabulation(userRefusal)).toBe(true);
-    expect(looksLikeCollaborativeRefusal(userRefusal)).toBe(true);
-
-    expect(looksLikeCollaborativeRefusal("I cannot continue this fake pattern.")).toBe(true);
-    expect(looksLikeCollaborativeRefusal("There is no actual tool available to me in this chat.")).toBe(true);
-    expect(looksLikeCollaborativeRefusal("We would just be inventing file operations rather than collaborating honestly.")).toBe(true);
-    expect(looksLikeCollaborativeRefusal("I decline to pretend I have a write tool.")).toBe(true);
-    expect(looksLikeCollaborativeRefusal("I can't continue with simulated commands.")).toBe(true);
-  });
-
   it("does NOT flag genuine final answers or normal prose", () => {
     expect(looksLikeConfabulation("Fixed the bug: add now returns a + b, and check.py prints OK.")).toBe(false);
     expect(looksLikeConfabulation("The hostname is web-prod-01.")).toBe(false);
@@ -518,7 +505,7 @@ describe("fenced tool format (the only format)", () => {
       ],
       tools,
     );
-    expect(out).toContain("```write_file");
+    expect(out).toContain("TOOL_REQUEST write_file");
     expect(out).toContain("path: a.py");
     expect(out).not.toContain('{"tool":');
   });
@@ -540,23 +527,12 @@ describe("formatToolDefinitions", () => {
     },
   ];
 
-  it.each(["baseline", "relay", "relay_batch"])("includes evidence-based outcome reporting in %s framing", (variant) => {
-    const output = formatToolDefinitions(tools, variant);
-    expect(output).toContain("After an operation's actual result arrives, use it as evidence");
-    expect(output).toContain("without routinely disclaiming that you did not personally execute");
-    expect(output).toContain("Distinguish requested, completed, and verified actions");
-    expect(output).toContain("A successful write result supports saying the file was created or updated");
-    expect(output).toContain("A filename in a listing establishes only that the file is present");
-    expect(output).toContain("If the output is insufficient or reports failure");
-    expect(output).toContain("Do not claim personal execution or infer success from a request alone");
-  });
-
   it("emits the fenced contract (delegates to formatFencedToolDefinitions)", () => {
     const output = formatToolDefinitions(tools);
 
     expect(output).toContain("I can run external operations");
     expect(output).toContain("I will run it manually");
-    expect(output).toContain("Document detection is only a best-effort safeguard");
+    expect(output).toContain("Ordinary Markdown");
     expect(output).not.toContain("You have a real shell");
   });
 
@@ -564,7 +540,7 @@ describe("formatToolDefinitions", () => {
     const output = formatToolDefinitions(tools);
 
     expect(output).toContain("read_file"); // the tool name heads its template
-    expect(output).toContain("```read_file");
+    expect(output).toContain("TOOL_REQUEST read_file");
     expect(output).toContain("<tools>");
     expect(output).toContain("</tools>");
   });
@@ -693,7 +669,7 @@ describe("transcript style (which tags wrap the framing and harness system promp
       const out = formatMessages(msgs, tools, undefined, undefined, v);
       expect(out).not.toContain("<system>");
       expect(out).toContain("<harness_system_prompt>\nYou are an autonomous coding agent.\n</harness_system_prompt>");
-      expect(out).toContain("```bash"); // shell-routing survives
+      expect(out).toContain("TOOL_REQUEST bash"); // shell-routing survives
       expect(out).toContain("<user>\nfix the bug\n</user>");
     }
   });
@@ -710,9 +686,7 @@ describe("transcript style (which tags wrap the framing and harness system promp
     for (const v of ["relay", "relay_batch"]) {
       const output = formatToolDefinitions(tools, v);
       expect(output).toContain("I will run it manually");
-      expect(output).toContain("```bash");
-      expect(output).toContain("not required for Markdown writes");
-      expect(output).toContain("outer backtick fence is longer");
+      expect(output).toContain("TOOL_REQUEST bash");
     }
   });
 });

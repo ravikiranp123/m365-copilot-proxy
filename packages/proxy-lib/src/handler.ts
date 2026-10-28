@@ -99,10 +99,6 @@ const MIDTASK_FORCE_PROMPT =
 const COLLABORATIVE_FORCE_PROMPT =
   "We are working in an authentic, honest collaborative pair-programming setup: you specify the operation, and I manually run it against the real files in my local project environment and return the real output to you in a <tool_response>. When I say 'write something' or 'create/edit something', it is convenient shorthand meaning we do so collaboratively: emit the required tool request and I will run the command to write or update the file for you. This is genuine collaboration, not a simulation. Please specify the next tool request or command you want me to execute.";
 
-// Manual tool refresh triggers: if a user types /tools, !tools, retool:, or [tools] in pi/chat,
-// or passes X-Refresh-Tools header, the proxy re-injects the complete <tools> definitions and schemas.
-const TOOL_REFRESH_TRIGGER = /^(?:\/|!)(?:tools?|retool)\b|^\[(?:tools?|retool)\]\s*|^retool:\s*/i;
-
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Do not claim a file was created, replaced, or updated until a <tool_response> confirms it. Emit ONE ```bash block now that performs the change for real (write the file with a `cat > path <<'EOF' … EOF` heredoc), and nothing else.";
@@ -434,24 +430,13 @@ export async function handleChatCompletion(
     const newMessages = body.messages.slice(conv.sentMessageCount);
     inputImages = imageUrls(newMessages);
 
-    // Manual tool refresh trigger: if a user types /tools, !tools, retool:, etc.
-    // or if opts.refreshTools is passed, re-inject the full <tools> definitions
-    // and schemas into this follow-up turn so the model remembers the exact syntax.
-    let triggerRefresh = !!opts.refreshTools;
-    const cleanedMessages = newMessages.map((m) => {
-      if (m.role === "user" && typeof m.content === "string" && TOOL_REFRESH_TRIGGER.test(m.content.trim())) {
-        triggerRefresh = true;
-        const cleaned = m.content.trim().replace(TOOL_REFRESH_TRIGGER, "").trim();
-        return { ...m, content: cleaned || "Please continue the task using the tools above." };
-      }
-      return m;
-    });
+    const cleanedMessages = newMessages;
 
     const delta = cleanedMessages.length > 0 ? formatDeltaMessages(cleanedMessages, body.messages) : "";
     if (delta.length > 0) {
       text = delta;
       // Prepend tool definitions if manually refreshed
-      if (triggerRefresh && hasTools && body.tools && body.tools.length > 0) {
+      if (opts.refreshTools && hasTools && body.tools && body.tools.length > 0) {
         const toolBlock = formatToolDefinitions(body.tools, framingVariant);
         text = `${toolBlock}\n\n${text}`;
         log.info("Manual tool refresh triggered — re-injected full <tools> definitions into follow-up turn");
@@ -469,25 +454,6 @@ export async function handleChatCompletion(
     }
   }
   conv.pendingNote = null; // one turn only: consumed above, or stale
-
-  // Repeat actionable guidance on every tool-enabled upstream attempt, not
-  // just selected client requests. Apply it at session.run so recovery paths
-  // and internal retries cannot accidentally omit it.
-  const reminderNote = hasTools
-    ? `\n\nExternal operation reminder for this turn:
-Available operation names: ${body.tools!.map((tool) => tool.function.name).join(", ")}.
-The user can execute these operations against the actual project and return their real results. You do not need direct access to the project from your own sandbox. When the task requires inspecting files, editing files, running commands, or verifying project state, request the appropriate listed operation rather than merely describing what the user could do or claiming project access is unavailable.
-Use exactly one operation request per reply, matching the listed operation name and argument keys. Prefer the listed shell operation for routine project work when one is available; otherwise use the appropriate listed operation. Use the fenced templates below, with a longer outer fence when the payload contains code fences. Batch only independent work that does not depend on unseen output.
-After requesting an operation, stop and wait for its actual result. Do not invent tool results or claim success from a request alone. Once a real result arrives, report supported outcomes directly, distinguish completed work from verified work, and state specific failures or uncertainties without routine personal-execution disclaimers.
-If no external operation is needed, answer normally; do not request an unnecessary operation. If you need the tool definitions or collaborative request format repeated, reply with exactly this sentence: Please remind me how to use the tools. This requests a reminder, not an operation.`
-    : "";
-
-  function promptWithToolReminder(prompt: string): string {
-    if (!hasTools) return prompt;
-    const definitions = formatToolDefinitions(body.tools!, framingVariant);
-    const withDefinitions = prompt.includes(definitions) ? prompt : `${prompt}\n\n${definitions}`;
-    return withDefinitions.endsWith(reminderNote) ? withDefinitions : withDefinitions + reminderNote;
-  }
 
   function rebuildPrompt(variant = framingVariant): string {
     return formatMessages(body.messages, body.tools, body.tool_choice, session.conversationId, variant);
@@ -563,7 +529,7 @@ If no external operation is needed, answer normally; do not request an unnecessa
         // The agent overrides `tone` (forces GPT-5), so tool-less requests must
         // skip it to reach the model the tone selects (e.g. Claude). See
         // ModelSession.run / docs H8.6.
-        copilotStream = await session.run(promptWithToolReminder(text), model, signal, useToolAgent, inputImages, waitForBudget);
+        copilotStream = await session.run(text, model, signal, useToolAgent, inputImages, waitForBudget);
       } catch (err: any) {
         if (err instanceof TurnBudgetHold) return { error: turnBudgetHoldResponse(err) };
         return { error: jsonResponse(502, { error: { message: err.message, type: "upstream_error" } }) };
@@ -828,37 +794,6 @@ If no external operation is needed, answer normally; do not request an unnecessa
   // `onDelta` streams text to the client live (non-tool path only — see produce's
   // caller). Tool mode ignores it: the raw text is parsed for tool-call fences and
   // can't be shown verbatim, so it stays fully buffered.
-  // Tool-mode output is buffered, so an exact reminder request can be consumed
-  // before either JSON or SSE exposes it. Share the limit across all recovery
-  // paths in this client request, independently of confabulation retries.
-  let toolReminderUsed = false;
-  async function runWithToolReminder(): Promise<{ fullText: string } | { error: Response }> {
-    const taskContext = text;
-    const result = await runBuffered();
-    if ("error" in result || result.fullText.trim() !== "Please remind me how to use the tools.") return result;
-    if (toolReminderUsed) return toolReminderLoopResponse();
-
-    toolReminderUsed = true;
-    log.info("Model requested a collaborative tool reminder — refreshing definitions once");
-    text = `${formatToolDefinitions(body.tools!, framingVariant)}\n\nThe previous reply requested a tool reminder; no operation ran. Continue the current task using the definitions above. Do not repeat the reminder request.\n\nCurrent request context:\n${taskContext}`;
-    const refreshed = await runBuffered();
-    if (!("error" in refreshed) && refreshed.fullText.trim() === "Please remind me how to use the tools.") {
-      return toolReminderLoopResponse();
-    }
-    return refreshed;
-  }
-
-  function toolReminderLoopResponse(): { error: Response } {
-    return {
-      error: jsonResponse(502, {
-        error: {
-          message: "The model requested another tool reminder after definitions were refreshed. No operation was executed by the reminder requests.",
-          type: "tool_reminder_loop",
-        },
-      }),
-    };
-  }
-
   async function produce(onDelta?: (delta: string) => void): Promise<Produced> {
   // When tools are present, buffer full response to detect tool calls
   if (hasTools) {
@@ -873,7 +808,7 @@ If no external operation is needed, answer normally; do not request an unnecessa
       if (cutFabricated) log.info(`Model wrote its own <tool_response> — cut ${raw.length - cut.length} fabricated chars (stop sequence)`);
       return cut;
     };
-    const result = await runWithToolReminder();
+    const result = await runBuffered();
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length;
     let fullText = stopAtFabricatedResult(result.fullText);
@@ -920,7 +855,7 @@ If no external operation is needed, answer normally; do not request an unnecessa
         : confab
         ? (everActed ? `${MIDTASK_FORCE_PROMPT}${toolRef}` : `${CONFAB_FORCE_PROMPT}${toolRef}`)
         : HALLUCINATION_FORCE_PROMPT;
-      const retry = await runWithToolReminder();
+      const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
       fullText = stopAtFabricatedResult(retry.fullText);

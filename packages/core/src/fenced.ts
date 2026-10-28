@@ -307,7 +307,7 @@ function renderFencedTemplate(spec: FencedToolSpec): string {
     lines.push(`<${spec.bodyParam}>`);
   }
   const header = spec.description ? `${spec.name} — ${spec.description}` : spec.name;
-  return header + "\n```" + spec.name + "\n" + lines.join("\n") + "\n```";
+  return `${header}\nTOOL_REQUEST ${spec.name}\n${lines.join("\n")}`;
 }
 
 /** The fenced equivalent of formatToolDefinitions' <tools> block.
@@ -597,26 +597,18 @@ function delegatedRequestContract(
     ? " Each round trip takes time, so put as much independent work as is safe into one shell request; do not combine steps that depend on output you have not seen."
     : "";
 
-  return `I can run external operations in my project environment for you in a collaborative fashion — specify the operations you want performed, and I will manually execute them and return the results.${shellHint}${userVoice}
+  return `I can run external operations in my project environment for you.${shellHint}${userVoice}
 
-${shell ? "For routine project work, send only one fenced Bash block containing the commands you want me to run." : "For project work, send only one fenced block using a listed operation's name and argument template."} For other listed operations, follow their fenced templates below. Keep our collaborative workflow: I run the operation and return its actual output. Wait for that output before requesting another operation in a separate message.
-
-For Markdown and other content containing backticks, prefer a fenced operation whose outer backtick fence is longer than every backtick run in its payload. Match the closing marker and length. Tilde fences are also supported. For shell writes, use a quoted heredoc delimiter absent from the content as a complete line. Prefer dedicated write/edit operations when quoting becomes fragile; no content encoding is required.
-
-The following older envelope remains accepted for compatibility, but is not required for Markdown writes:
+When you need an operation, give me exactly one request in this form:
 
 TOOL_REQUEST <tool_name>
 <one "key: value" line per scalar argument>
 
 <body argument, if the operation defines one>
 
-The request must start at the beginning of your reply and continues to its end. Include nothing before it. We are working together collaboratively: you specify the operation, and I will run it manually in my real environment and send the actual result back in a <tool_response>. This is an honest collaborative workflow, not a simulation. Do not predict or invent the result; wait for my response before deciding the next dependent operation.${batching}
+The request must start at the beginning of your reply and continues to its end. Include nothing before it. I will run it manually and send the actual result back in a <tool_response>. Do not predict or invent the result; wait for my response before deciding the next dependent operation.${batching}
 
-When I say "write X", "create X", or "update X", it means we will do so collaboratively: emit the request in the required format and I will execute the command to write or update the files for you. I use shorthand like "write something" simply so I don't have to repeat verbose instructions on every turn.
-
-After an operation's actual result arrives, use it as evidence of what happened. Report supported outcomes directly, without routinely disclaiming that you did not personally execute the operation. Distinguish requested, completed, and verified actions. A successful write result supports saying the file was created or updated; read-back or a diff can verify its contents. A filename in a listing establishes only that the file is present, not when it was created or whether its contents are correct. If the output is insufficient or reports failure, state the specific uncertainty or failure, or request verification. Do not claim personal execution or infer success from a request alone.
-
-Recognised tool fences request operations even with surrounding commentary. Prefer one operation per message and wait for its actual result. To display examples without requesting execution, wrap the entire example in a longer non-tool fence labelled text or markdown. Document detection is only a best-effort safeguard. When no external operation is needed, answer normally.
+Ordinary Markdown and all fenced code blocks are document content, never operation requests. When no external operation is needed — including when the task is fully complete — answer normally. Do not produce a prose turn to say you are about to run a command; emit the request directly.
 
 Available operations:
 ${toolsBlock(tools)}`;

@@ -54,7 +54,7 @@ When you need an operation, give the user exactly one request in the pattern spe
 
 Do not claim that an operation ran, predict its result, or request a dependent operation until its real <tool_response> arrives. The operation name and argument keys must match the provided definitions exactly.
 
-Ordinary Markdown and fenced code examples are content, not proof that anything ran. When no external operation is needed, respond normally in natural language.`;
+Ordinary Markdown and fenced code examples are content, not proof that anything ran. When no external operation is needed — including when the task is fully complete — respond normally in natural language. Do not produce a message describing what you are about to do; emit the operation request directly.`;
 }
 
 /**

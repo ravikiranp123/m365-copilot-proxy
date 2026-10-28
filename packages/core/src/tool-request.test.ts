@@ -40,6 +40,7 @@ const tools: ToolDef[] = [
 ];
 
 afterEach(() => {
+  delete process.env.M365_ACCEPT_LEGACY_FENCES;
   delete process.env.M365_ACCEPT_LEGACY_JSON;
 });
 
@@ -62,12 +63,11 @@ describe("TOOL_REQUEST protocol", () => {
     });
   });
 
-  it("parses a recognised shell fence with surrounding prose", () => {
+  it("never executes an ordinary Markdown shell example", () => {
     const markdown = ["Run with:", "", `${fence}bash`, "pnpm install", fence].join("\n");
     const result = parseToolCalls(markdown, tools);
-    expect(result.hasToolCalls).toBe(true);
-    expect(result.textContent).toBe("Run with:");
-    expect(JSON.parse(result.toolCalls[0].function.arguments)).toEqual({ command: "pnpm install" });
+    expect(result.hasToolCalls).toBe(false);
+    expect(result.textContent).toBe(markdown);
   });
 
   it("preserves Markdown fences and EOF whitespace in a write body", () => {
@@ -83,9 +83,9 @@ describe("TOOL_REQUEST protocol", () => {
     });
   });
 
-  it("parses multiple fences for the handler to apply its single-operation limit", () => {
+  it("treats multiple whole-response fences as content", () => {
     const markdown = `${fence}bash\nls\n${fence}\n${fence}bash\npwd\n${fence}`;
-    expect(parseToolCalls(markdown, tools).toolCalls).toHaveLength(2);
+    expect(parseToolCalls(markdown, tools).hasToolCalls).toBe(false);
   });
 
   it("treats legacy JSON as content unless explicitly enabled", () => {
@@ -108,12 +108,10 @@ describe("TOOL_REQUEST protocol", () => {
     expect(result.hasToolCalls).toBe(false);
   });
 
-  it("preserves commentary around an operation without requiring a flag", () => {
-    const result = parseToolCalls(`I will inspect the project.\n${fence}bash\npwd\n${fence}\nThen I can choose the next step.`, tools);
+  it("supports explicit legacy migration mode", () => {
+    process.env.M365_ACCEPT_LEGACY_FENCES = "1";
+    const result = parseToolCalls(`${fence}bash\nls\n${fence}`, tools);
     expect(result.hasToolCalls).toBe(true);
-    expect(result.textContent).toContain("I will inspect the project.");
-    expect(result.textContent).toContain("Then I can choose the next step.");
-    expect(JSON.parse(result.toolCalls[0].function.arguments)).toEqual({ command: "pwd" });
   });
 
   it("round-trips request rendering with Markdown content", () => {
@@ -132,11 +130,8 @@ describe("TOOL_REQUEST protocol", () => {
   it("uses delegated wording without claiming tool ownership", () => {
     const prompt = formatFencedToolDefinitions(tools, "baseline");
     expect(prompt).toContain("I will run it manually");
-    expect(prompt).toContain("```bash");
-    expect(prompt).toContain("TOOL_REQUEST <tool_name>");
-    expect(prompt).toContain("not required for Markdown writes");
-    expect(prompt).toContain("outer backtick fence is longer");
-    expect(prompt).toContain("Document detection is only a best-effort safeguard");
+    expect(prompt).toContain("TOOL_REQUEST bash");
+    expect(prompt).toContain("Ordinary Markdown");
     expect(prompt).not.toContain("You have a real shell");
   });
 });
