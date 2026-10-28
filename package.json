@@ -6,16 +6,18 @@
   "scripts": {
     "dev": "pnpm --filter @m365-copilot/proxy dev",
     "build": "pnpm -r build",
-    "proxy": "node packages/proxy/bin/m365-proxy.mjs",
+    "proxy": "node --env-file-if-exists=.env packages/proxy/bin/m365-proxy.mjs",
     "sync:pi": "node scripts/sync-pi-models.mjs",
     "models:sync": "node scripts/sync-pi-models.mjs",
     "pi": "bash scripts/pi-local.sh",
     "test": "pnpm test:unit",
     "test:unit": "pnpm build && npx vitest run",
-    "test:live": "pnpm build && M365_LIVE=1 npx vitest run"
+    "test:live": "pnpm build && M365_LIVE=1 npx vitest run",
+    "sync:opencode": "node scripts/sync-pi-models.mjs --client opencode"
   },
   "packageManager": "pnpm@10.32.1",
   "devDependencies": {
+    "jsonc-parser": "^3.3.1",
     "tsdown": "^0.21.5",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",

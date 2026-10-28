@@ -624,10 +624,18 @@ export class CopilotSession {
         }
       });
 
-      ws.on("close", () => {
+      ws.on("close", (code: number) => {
         clearAbort();
         log.info("WS closed, answer length:", answer.length);
         log.debug("Final response:", trunc(answer, 1000));
+        // chat() resolves only after sendChat(). A socket that closes before
+        // the handshake must reject, otherwise the caller waits forever and
+        // ModelSession never gets the chance to reconnect.
+        if (!handshakeDone) {
+          reject(signal?.aborted
+            ? signal.reason ?? new Error("WebSocket connection aborted")
+            : new Error(`WebSocket closed before handshake (code ${code})`));
+        }
         onDone();
       });
 
