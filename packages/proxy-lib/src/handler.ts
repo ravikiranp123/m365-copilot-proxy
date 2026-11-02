@@ -90,7 +90,34 @@ const CONFAB_FORCE_PROMPT =
 // follow an obstacle — no PDF tool or Word library installed — so say what is
 // true: the tools work, and a missing program is something to install.
 const MIDTASK_FORCE_PROMPT =
-  "Your tools are working: your previous command really ran on this machine, and its real output is in the last <tool_response>. Continue the task from there with ONE tool block for the next step. A missing program or library is not a missing tool — install it with the package manager (pip, npm, …) or do the job with what is already installed. Output only the tool block, nothing else.";
+  "The tool request you made in the previous turn was executed by the user or harness, and its real result is in the latest <tool_response>. Treat that result as an authoritative observation of the live environment. Continue the task from that verified state with ONE tool block for the next concrete step. A missing program or library is not a missing tool; install it with the available package manager (pip, npm, etc.) or use an alternative already present in the environment. Do not ask the user to perform work that can be accomplished through the available tools. Output only the tool block, nothing else.";
+
+// Collaboration reminder attached to every tool-result turn. The goal is not
+// to refresh tool schemas, but to reinforce the execution model at the exact
+// moment the model is deciding what to do with a real tool result.
+function toolReminderForVariant(framingVariant: string): string {
+  const relayLike = framingVariant.startsWith("relay");
+
+  return relayLike
+    ? `Collaboration reminder:
+
+You request actions through the available tools.
+
+The user or harness executes those requests and returns the real results.
+
+Treat each <tool_response> as an authoritative observation from the live environment.
+
+If the task is not complete and a tool can advance it, request the next action rather than stopping, summarizing, or handing work back to the user.`
+    : `Reminder:
+
+You request actions through the available tools.
+
+The user or harness executes those requests and returns the real results.
+
+Treat every <tool_response> as an authoritative observation from the live environment.
+
+If the task is not complete and a tool can advance it, request the next action rather than stopping, summarizing, or handing work back to the user.`;
+}
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -147,6 +174,7 @@ interface ConversationState {
   session: ModelSession;
   sentMessageCount: number;
   lastAccessedAt: number;
+  toolReminderCounter: number;
   /** Sent ahead of the next tool result when the proxy executed less than the
    *  model wrote last turn (see executedOnlyFirstNote). */
   pendingNote: string | null;
@@ -225,6 +253,7 @@ export class SessionPool {
         log.info(`Conversation ${fingerprint}: not a continuation (${messages.length} <= ${existing.sentMessageCount} sent), starting a fresh M365 conversation`);
         existing.session.newConversation();
         existing.sentMessageCount = 0;
+        existing.toolReminderCounter = 0;
         existing.pendingNote = null;
       }
       existing.lastAccessedAt = Date.now();
@@ -236,6 +265,7 @@ export class SessionPool {
     const state: ConversationState = {
       session: new ModelSession(this.sessionOptions),
       sentMessageCount: 0,
+      toolReminderCounter: 0,
       pendingNote: null,
       lastAccessedAt: Date.now(),
     };
@@ -422,9 +452,24 @@ export async function handleChatCompletion(
     const delta = newMessages.length > 0 ? formatDeltaMessages(newMessages, body.messages) : "";
     if (delta.length > 0) {
       text = delta;
+
+      const hasToolResult = newMessages.some((m) => m.role === "tool");
+
+      if (
+        hasTools &&
+        hasToolResult &&
+        TOOL_REMINDER_INTERVAL > 0 &&
+        ++conv.toolReminderCounter % TOOL_REMINDER_INTERVAL === 0
+      ) {
+        text = `${toolReminderForVariant(framingVariant)}\n\n${text}`;
+        log.info(
+          `Injected lightweight tool reminder after ${conv.toolReminderCounter} tool-result turns (interval=${TOOL_REMINDER_INTERVAL}, variant=${framingVariant})`
+        );
+      }
+
       // Only a tool result is the thing the note corrects the model about.
       if (conv.pendingNote && newMessages.some((m) => m.role === "tool")) {
-        text = `${conv.pendingNote}\n\n${delta}`;
+        text = `${conv.pendingNote}\n\n${text}`;
         log.info("Prepended the only-the-first-call-ran note (last reply was partly executed)");
       }
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, new=${newMessages.length}, turn=${session.turnCount}, mode=delta, cid=${convId}`);

@@ -5,6 +5,7 @@ dist
 token.txt
 msal-cache.json
 secrets.json
+.m365-example/
 *.har
 .env
 result

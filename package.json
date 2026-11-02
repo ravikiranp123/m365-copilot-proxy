@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "pnpm --filter @m365-copilot/proxy dev",
     "build": "pnpm -r build",
-    "proxy": "node packages/proxy/bin/m365-proxy.mjs",
+    "proxy": "node --env-file-if-exists=.env packages/proxy/bin/m365-proxy.mjs",
+    "proxy:example": "mkdir -p .m365-example && cp -n secrets.example.json .m365-example/secrets.json && PORT=${PORT:-4142} M365_SECRETS_FILE=$PWD/.m365-example/secrets.json M365_CACHE_FILE=$PWD/.m365-example/msal-cache.json M365_BROWSER_PROFILE=$PWD/.m365-example/browser-profile node --env-file-if-exists=.env packages/proxy/bin/m365-proxy.mjs",
     "pi": "bash scripts/pi-local.sh",
     "test": "pnpm test:unit",
     "test:unit": "pnpm build && npx vitest run",

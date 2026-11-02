@@ -216,6 +216,45 @@ describe("parseFencedToolCalls", () => {
     expect(calls.map((c) => JSON.parse(c.function.arguments).command)).toEqual(["ls -la"]);
   });
 
+  it("does not mistake hashline or diff +/- code fences for glued closers", () => {
+    const editTool: ToolDef = {
+      type: "function",
+      function: {
+        name: "edit",
+        description: "Apply hashline patches",
+        parameters: {
+          type: "object",
+          properties: {
+            i: { type: "string" },
+            input: { type: "string" },
+          },
+          required: ["input"],
+        },
+      },
+    };
+    const editSpecs = buildSpecMap([editTool]);
+    const payload = [
+      "```edit",
+      "i: updating doc",
+      "",
+      "[DOC.md#A1B2]",
+      "PUT >10:",
+      "+",
+      "+```",
+      "+",
+      "+```text",
+      "+some code",
+      "+```",
+      "+final line",
+      "```",
+    ].join("\n");
+    const { calls } = parseFencedToolCalls(payload, editSpecs);
+    expect(calls).toHaveLength(1);
+    const args = JSON.parse(calls[0]!.function.arguments);
+    expect(args.input).toContain("+final line");
+    expect(args.input).toContain("+some code");
+  });
+
   it("still parses a call whose opening fence follows prose on the same line", () => {
     const { calls, leftover } = parseFencedToolCalls("Running it: ```bash\nls -la\n```", specs);
     expect(calls.map((c) => JSON.parse(c.function.arguments).command)).toEqual(["ls -la"]);

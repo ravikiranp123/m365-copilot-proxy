@@ -915,6 +915,10 @@ const FENCE_CLOSE = /^[ \t]*```[ \t]*$/;
 // level, where they can't be mistaken for nesting.
 const FENCE_OPEN_MIDLINE = /```([A-Za-z0-9_.-]+)[ \t]*$/;
 const FENCE_CLOSE_GLUED = /\S```[ \t]*$/;
+// Fences inside diff/hashline bodies begin with a +/- sigil; they must not be
+// mistaken for outer tool closers or glued closers (#105).
+const DIFF_FENCE_OPEN = /^[ \t]*[+-]```([A-Za-z0-9_.-]+)[ \t]*$/;
+const DIFF_FENCE_CLOSE = /^[ \t]*[+-]```[ \t]*$/;
 
 interface FenceBlock {
   info: string;
@@ -948,6 +952,7 @@ function scanFences(text: string): FenceBlock[] {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const lineEnd = offset + raw.length;
     const opener = FENCE_OPEN.exec(line)?.[1];
+    const diffOpener = depth > 0 ? DIFF_FENCE_OPEN.exec(line)?.[1] : undefined;
     if (depth === 0) {
       const midline = opener ? null : FENCE_OPEN_MIDLINE.exec(line);
       if (opener || midline) {
@@ -961,9 +966,11 @@ function scanFences(text: string): FenceBlock[] {
         blocks.push({ info: open.info, inner, start: open.start, end: lineEnd });
         open = null;
       }
-    } else if (opener) {
+    } else if (depth > 1 && DIFF_FENCE_CLOSE.test(line)) {
+      depth--;
+    } else if (opener || diffOpener) {
       depth++;
-    } else if (depth === 1 && open && FENCE_CLOSE_GLUED.test(line)) {
+    } else if (depth === 1 && open && !/^[ \t]*[+-]/.test(line) && FENCE_CLOSE_GLUED.test(line)) {
       const inner = text.slice(open.bodyStart, offset + line.trimEnd().length - 3);
       blocks.push({ info: open.info, inner, start: open.start, end: lineEnd });
       open = null;
