@@ -14,10 +14,21 @@
       "port": 4142,
       "dataDir": "~/.config/opencode-m365/profiles/ato",
       "env": {
-        "M365_AGENT_ID": "T_26402370-428e-d802-c735-a2e224f9dea6",
-        "M365_FRAMING_VARIANT": "relay_batch"
+        "M365_AGENT_ID": "T_26402370-428e-d802-c735-a2e224f9dea6"
       },
       "notes": "ATO tenant on :4142; MCP-enabled Copilot Studio agent."
+    },
+    "fritz": {
+      "port": 4143,
+      "dataDir": "~/.config/opencode-m365/profiles/fritz"
+    },
+    "t10011": {
+      "port": 4144,
+      "dataDir": "~/.config/opencode-m365/profiles/t10011",
+      "env": {
+        "M365_AGENT_ID": "T_26402370-428e-d802-c735-a2e224f9dea6"
+      },
+      "notes": "ATO tenant on :4144; Free user; shares the ATO Standard agent (WT tools) via its titleId."
     }
   }
 }

@@ -297,6 +297,14 @@ async function driveAzureLogin(page: any, creds: Credentials): Promise<void> {
   }
 
   if (await isVisibleSoon(page, 'input[name="otc"]', 8000)) {
+    if (!creds.mfaSecret) {
+      throw new Error(
+        "Azure AD prompted for a TOTP code but this profile has no mfaSecret configured. " +
+          "Add one with `pnpm profiles add <name> --mfa-secret <seed>` (or edit secrets.json), " +
+          "or if this tenant uses push/FIDO2/Windows Hello/federated MFA (no TOTP seed exists), " +
+          "set M365_ENABLE_INTERACTIVE_APPROVAL=1 for a one-time interactive login instead.",
+      );
+    }
     log.info("Step: mfa");
     const otpCode = new TOTP({ secret: creds.mfaSecret }).generate();
     await fillVerified(page, 'input[name="otc"]', otpCode, "otc");
@@ -626,7 +634,17 @@ export function loadSecrets(): {
   if (!existsSync(SECRETS_FILE)) return null;
   try {
     const data = JSON.parse(readFileSync(SECRETS_FILE, "utf-8"));
-    if (data.email && data.password && data.mfaSecret) return data;
+    // mfaSecret is OPTIONAL: a genuinely MFA-free tenant has no TOTP seed to
+    // give it, and driveAzureLogin already skips the OTC step entirely when
+    // Azure AD doesn't show one (it checks `isVisibleSoon` per field, same as
+    // the SSO-silent path). Gating login on a truthy mfaSecret made that path
+    // unreachable — a valid email+password pair was silently treated as "no
+    // secrets file at all". If the tenant DOES prompt for TOTP and there's no
+    // secret configured, driveAzureLogin throws there instead (see below) —
+    // a one-line, correctly-attributed error instead of a generic one here.
+    if (data.email && data.password) {
+      return { email: data.email, password: data.password, mfaSecret: data.mfaSecret ?? "" };
+    }
   } catch {}
   return null;
 }

@@ -660,6 +660,20 @@ export async function handleChatCompletion(
         return { error: throttledResponse(copilotStream.result) };
       }
 
+      // The account's M365 Copilot license simply doesn't cover this
+      // model/tone (ForbiddenRequest: InvalidCopilotLicense /
+      // PremiumModelUnavailableForLicense / ClaudeUnavailableForLicense — F46).
+      // This is deterministic and about the account, not a transient empty
+      // reply, an agent problem, or something a "Please continue." retry can
+      // fix — every retry returns the identical refusal. Checked BEFORE the
+      // agent-fallback/InternalError/empty-reply handling below so it can't be
+      // mistaken for any of those and silently burn MAX_RETRIES.
+      if (copilotStream.result?.value === "ForbiddenRequest") {
+        noteRequestOutcome(false, convId); // an answer (a refusal), not a throttle
+        log.info(`Upstream ForbiddenRequest (${copilotStream.result.errorCode ?? "no errorCode"}) — this account's license doesn't cover ${model}, failing fast`);
+        return { error: licenseDeniedResponse(model, copilotStream.result) };
+      }
+
       // A tone whose agent route serves only on a premium account came back as
       // the dead route (`InternalError`, no content): this account isn't
       // premium. Remember that for the process, and re-send the WHOLE request
@@ -1286,6 +1300,25 @@ function premiumOnlyModelResponse(model: string): Response {
       message: `M365 Copilot didn't serve ${model}: it returned InternalError on every attempt. ${model} is served only on a premium (paid Microsoft 365 Copilot) account; on any other account use claude-sonnet.`,
       type: "upstream_error",
       code: "model_route_unavailable",
+    },
+  });
+}
+
+/** The account's M365 Copilot license doesn't cover this model at all
+ *  (`result.value: "ForbiddenRequest"` — `InvalidCopilotLicense` /
+ *  `PremiumModelUnavailableForLicense` / `ClaudeUnavailableForLicense`, F46).
+ *  Distinct from `premiumOnlyModelResponse`: that's a dead route with NO
+ *  content (`InternalError`) on every account type; this one carries a real
+ *  BotConnection refusal and fires only for a seat lacking the entitlement. */
+function licenseDeniedResponse(model: string, result: { errorCode?: string; message?: string }): Response {
+  const scope = result.errorCode ? ` (${result.errorCode})` : "";
+  return jsonResponse(502, {
+    error: {
+      message: `M365 Copilot refused ${model}${scope}: ${result.message ?? "this account's license doesn't cover this model"} ` +
+        `This is an account licensing limit, not a throttle or an agent problem — retrying will not help; use a model your license covers (e.g. m365-copilot).`,
+      type: "upstream_error",
+      code: "model_license_denied",
+      ...(result.errorCode ? { param: result.errorCode } : {}),
     },
   });
 }
