@@ -1,153 +1,212 @@
 # MCP Proxy Plan
 
-## Core Insight
+## Goal
 
-Do not integrate with OMP/OpenCode internals.
+Stop relying on prompt-emulated tool calling.
 
-The proxy already sits on the model API boundary and receives the exact tool definitions that are sent to the model.
+Instead of creating a transient `m365-tool-agent-*` and convincing the model to emit
+fenced tool calls, use a published Copilot Studio agent that already has native MCP
+tool access.
 
-The proxy therefore already has access to:
+The system becomes a bridge between:
 
-- Tool names
-- Tool descriptions
-- Tool schemas
-- Session identifiers
-- Tool call messages
-- Tool result messages
+- OpenAI-compatible coding harnesses
+- Copilot Studio native tool orchestration
+- A local MCP server
 
-No separate tool registry is required.
+The proxy's primary responsibility is selecting and routing to the configured
+Copilot Studio agent. Tool execution is delegated to Microsoft's MCP
+orchestration and the local MCP adapter.
 
 ---
 
 ## Architecture
 
-OMP/OpenCode
-    -> OpenAI/Anthropic-compatible API
+Current:
+
+Harness
     -> Proxy
+    -> m365-tool-agent-*
     -> Model
+    -> Fenced tool call
+    -> Proxy parser
+    -> Harness
 
-Add:
+Proposed:
 
-Copilot
-    -> MCP
+Harness
     -> Proxy
+    -> Existing Copilot Studio Agent
 
-The proxy becomes a protocol translator.
+Agent
+    -> Native MCP Tool Call
+    -> Local MCP Server
 
----
+Local MCP Server
+    -> Existing Harness Tool Runtime
 
-## Tool Discovery
+Existing Harness Tool Runtime
+    -> Tool Result
 
-When the first request for a session arrives:
+Local MCP Server
+    -> MCP Tool Result
 
-Store:
+Agent
+    -> Final Response
 
-session_id -> tools[]
+The model never needs to emit fenced tool syntax.
 
-The tools are already present in requests such as:
-
-{
-  "messages": [...],
-  "tools": [...]
-}
-
-MCP tools/list simply returns the cached tools.
-
-No discovery API is needed.
-
-No harness integration is needed.
-
-No MCP server introspection is needed.
+Tool execution decisions are made by Microsoft's native orchestration layer.
 
 ---
 
-## Tool Execution
+## Agent Selection
 
-When Copilot sends:
+Add an environment variable:
 
-tools/call(name, arguments)
+    M365_AGENT_ID=<copilot-studio-agent-id>
 
-The proxy should generate the same tool-use payload that a model would normally generate.
+When present:
 
-The harness does not care whether the tool call originated from:
+- Do not create `m365-tool-agent-*`
+- Do not update agent instructions
+- Do not version agents
+- Do not manage agent lifecycle
+- Attach to the specified published agent directly
 
-- Claude
-- GPT
-- Gemini
-- Copilot
-- A test client
-
-The harness only cares that it receives a valid tool invocation.
-
-Therefore:
-
-MCP tools/call
-    ->
-Synthetic model tool_use message
-    ->
-Existing session
+Current behaviour remains the default when the variable is unset.
 
 ---
 
-## Tool Results
+## Local MCP Server
 
-Do not execute tools in the proxy.
+The MCP server is intentionally thin.
 
-Allow the existing harness/runtime to execute them.
+It does not:
 
-Wait for the normal tool_result event.
+- implement tool logic
+- duplicate harness functionality
+- require custom per-tool adapters
 
-Translate:
+Its responsibility is translating between:
 
-tool_result
-    ->
-MCP tool response
+- Copilot Studio MCP tool invocations
+- Existing harness tool invocations
 
-Return to Copilot.
-
----
-
-## Session Model
-
-Maintain:
-
-session_id
-    -> tools
-    -> conversation state
-    -> pending MCP requests
-
-The proxy acts as a mailbox between:
-
-- MCP clients
-- Existing agent sessions
+The goal is to reuse the existing harness tool ecosystem unchanged.
 
 ---
 
-## Why This Is Simple
+## Tool Mapping
 
-The proxy already receives:
+The existing harness already defines:
 
-- tools
-- messages
-- tool calls
+- tool names
+- tool descriptions
+- tool schemas
 - tool results
 
-Therefore the proxy does not need:
+The MCP adapter should translate between:
 
-- custom tool adapters
-- runtime plugins
-- tool registries
-- code generation
-- harness modifications
+    MCP tool invocation
+        <->
+    Harness tool call
 
-It only needs protocol translation:
+and
 
-MCP <-> existing model/tool protocol
+    MCP tool result
+        <->
+    Harness tool result
+
+No tool-specific business logic should live in the MCP layer.
+
+The harness should remain unaware that Copilot and MCP are involved.
 
 ---
 
-## Open Question
+## Important Clarification
 
-Verify how the proxy can inject a synthetic assistant/tool_use message into an active session.
+This proposal is intentionally different from the previous LocalMCP experiments.
 
-If sessions are already bidirectional and stateful, most of the implementation is already present.
+It does NOT attempt to:
+
+- reverse engineer LocalMcpDiscovery
+- inject dynamic tools into Copilot
+- expose tools through undocumented protocol paths
+- replace Microsoft's orchestration layer
+
+Instead it assumes:
+
+- a published Copilot Studio agent already exists
+- the agent is manually configured in Copilot Studio
+- the agent already has MCP access
+- Microsoft already performs native tool orchestration
+- MCP tool invocation has already been demonstrated to work
+
+The proxy's job is reduced to selecting and using that agent.
+
+---
+
+## Why This May Be Better Than The Current Approach
+
+Today the project spends significant effort compensating for the fact that the
+chat model itself is being asked to behave like an agent.
+
+Examples include:
+
+- fenced tool parsing
+- prompt engineering
+- framing experiments
+- tool-call compliance work
+- Disengaged mitigation
+- tool-call retries
+
+A Copilot Studio agent with native MCP support may avoid many of these issues
+because tool execution is handled by Microsoft's agent runtime rather than by
+prompting the model to emit tool syntax.
+
+---
+
+## Minimal Viable Experiment
+
+1. Create a Copilot Studio agent.
+2. Attach an MCP server.
+3. Verify native MCP tool invocation works.
+4. Add:
+
+       M365_AGENT_ID=<agent-id>
+
+5. Configure the proxy to use that agent instead of creating
+   `m365-tool-agent-*`.
+6. Run existing harness tasks through the selected agent.
+7. Measure:
+   - tool-call success rate
+   - Disengaged rate
+   - turn count
+   - benchmark score
+
+Success criterion:
+
+The existing harness works unchanged while tool execution is performed through
+the agent's native MCP capabilities instead of fenced-tool prompting.
+
+---
+
+## Open Questions
+
+1. Does the current code already support attaching to an arbitrary existing
+   Copilot Studio agent, or is agent creation hard-wired into the request path?
+
+2. Which code paths should be bypassed when `M365_AGENT_ID` is configured?
+   - agent provisioning
+   - instruction updates
+   - agent versioning
+   - agent lifecycle management
+
+3. How should harness sessions map to MCP sessions?
+
+4. Should the MCP adapter live inside the proxy process or as a separate
+   companion service?
+
+5. Which existing benchmark tasks improve when routed through the MCP-enabled
+   agent versus the current fenced-tool path?

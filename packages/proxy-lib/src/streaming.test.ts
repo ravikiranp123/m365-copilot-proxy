@@ -146,6 +146,32 @@ async function streamContents(deltas: string[], fullText?: string): Promise<stri
   return contents;
 }
 
+
+describe("SessionPool tool definition cache", () => {
+  it("maps OpenAI tools into MCP-friendly definitions", () => {
+    const pool = new SessionPool();
+    const tools = [{
+      type: "function" as const,
+      function: {
+        name: "bash",
+        description: "Run shell commands",
+        parameters: { type: "object", properties: { command: { type: "string" } } },
+      },
+    }];
+
+    const mapped = pool.getTools(
+      [{ role: "user", content: `tool-cache-${Math.random()}` }],
+      tools,
+    );
+
+    expect(mapped).toEqual([{
+      name: "bash",
+      description: "Run shell commands",
+      inputSchema: { type: "object", properties: { command: { type: "string" } } },
+    }]);
+  });
+});
+
 describe("incremental streaming (non-tool path)", () => {
   it("forwards deltas as separate chunks, not one buffered blob", async () => {
     const contents = await streamContents(["Hello", ", ", "world", "!"]);
@@ -738,7 +764,7 @@ describe("follow-up turns and give-ups (Windows / pi, measured)", () => {
     messages.push({ role: "tool", tool_call_id: m1.tool_calls[0].id, content: "none" });
     const m2 = await ask(messages, pool);
     expect(scripted.texts).toHaveLength(3);
-    expect(scripted.texts[2]).toContain("Your tools are working");
+    expect(scripted.texts[2]).toContain("The tool request you made in the previous turn was executed");
     expect(scripted.texts[2]).not.toContain("you have not run any command yet");
     expect(JSON.parse(m2.tool_calls[0].function.arguments).command).toBe("py -m pip install fpdf2");
     scripted.queue = [];
