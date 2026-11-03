@@ -5,6 +5,18 @@ import { SessionPool, handleChatCompletion } from "./handler.js";
 export { SessionPool, handleChatCompletion } from "./handler.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
 
+/** MCP sidecar: expose the same tool definitions a chat request would see,
+ *  for a session keyed by the same messages/tools the client already sends. */
+export function buildMcpToolsPayload(
+  pool: SessionPool,
+  messages: Array<{ role: string; content?: unknown }>,
+  tools?: unknown,
+) {
+  return {
+    tools: pool.getTools(messages as never, tools as never),
+  };
+}
+
 // Re-export tool utilities from core
 export {
   formatMessages,
