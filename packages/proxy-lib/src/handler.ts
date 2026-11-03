@@ -95,6 +95,11 @@ const MIDTASK_FORCE_PROMPT =
 // Collaboration reminder attached to every tool-result turn. The goal is not
 // to refresh tool schemas, but to reinforce the execution model at the exact
 // moment the model is deciding what to do with a real tool result.
+const TOOL_REMINDER_INTERVAL =
+  process.env.M365_TOOL_REMINDER_INTERVAL !== undefined
+    ? Number(process.env.M365_TOOL_REMINDER_INTERVAL)
+    : 0;
+
 function toolReminderForVariant(framingVariant: string): string {
   const relayLike = framingVariant.startsWith("relay");
 
@@ -168,6 +173,12 @@ const UNSTREAMED_BUDGET_WAIT_LIMIT_MS = 2 * 60_000;
 type ChatBody = z.infer<typeof ChatCompletionRequest>;
 type ParsedMessage = ChatBody["messages"][number];
 
+export interface MappedToolDefinition {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
 // --- Per-conversation state ---
 
 interface ConversationState {
@@ -178,6 +189,8 @@ interface ConversationState {
   /** Sent ahead of the next tool result when the proxy executed less than the
    *  model wrote last turn (see executedOnlyFirstNote). */
   pendingNote: string | null;
+  /** Latest OpenAI tool definitions seen for this conversation. */
+  toolDefinitions?: ChatBody["tools"];
   /** The model that last answered in this conversation. A different one (the
    *  Opus fallback, #18) can't continue the M365 conversation — it may need
    *  another scenario — so it starts a fresh one with the full history. */
@@ -257,6 +270,7 @@ export class SessionPool {
         existing.pendingNote = null;
       }
       existing.lastAccessedAt = Date.now();
+      if (tools) existing.toolDefinitions = tools;
       return existing;
     }
 
@@ -267,6 +281,7 @@ export class SessionPool {
       sentMessageCount: 0,
       toolReminderCounter: 0,
       pendingNote: null,
+      toolDefinitions: tools,
       lastAccessedAt: Date.now(),
     };
     this.conversations.set(fingerprint, state);
@@ -301,6 +316,14 @@ export class SessionPool {
 
   get size(): number {
     return this.conversations.size;
+  }
+
+  getTools(messages: ParsedMessage[], tools?: ChatBody["tools"]): MappedToolDefinition[] {
+    return (this.resolve(messages, tools).toolDefinitions ?? []).map((tool) => ({
+      name: tool.function.name,
+      description: tool.function.description,
+      inputSchema: tool.function.parameters,
+    }));
   }
 }
 
@@ -422,6 +445,12 @@ export async function handleChatCompletion(
   // agent-less path. The old `/claude/i.test(model)` + `magic` fallback split a
   // claude-* string into GPT-tone + agent-suppressed — the confab quadrant we
   // observed. One resolved tone drives both.
+  // --- MCP sidecar: parse optional model prefix m365/<profile>/<model> ---
+  let __profileName: string | undefined;
+  {
+    const m = /^m365\/([^\/]+)\/(.+)$/.exec(model);
+    if (m) { __profileName = m[1]; model = m[2]; }
+  }
   let tone = getToneForModel(model);
   // Framing default follows the MODEL (defaultFramingForModel): the Claude,
   // GPT-6 and GPT-6 Sol tones get a user-voice relay (Sonnet reads the
@@ -433,6 +462,11 @@ export async function handleChatCompletion(
   // M365_FRAMING_* still wins.
   let framingVariant = currentFramingVariant(defaultFramingForModel(model));
   let useToolAgent = requestUsesAgent(model, !!hasTools);
+  // --- MCP sidecar: enable agent only for ato profile with configured agent ID (unless forced) ---
+  if (process.env.M365_FORCE_AGENT !== "1") {
+    if (typeof __profileName === "string" && __profileName !== "ato") { useToolAgent = false; }
+    if (__profileName === "ato" && !process.env.M365_AGENT_ID) { useToolAgent = false; }
+  }
 
   // Format message: full prompt on first turn, delta on follow-ups.
   // M365 is stateful — it remembers everything from prior turns,
