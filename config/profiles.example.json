@@ -1,0 +1,22 @@
+{
+  "$schema": "./profiles.schema.json",
+  "profiles": {
+    "default": {
+      "port": 4141,
+      "dataDir": "~/.config/opencode-m365",
+      "env": {
+        "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      },
+      "notes": "Primary tenant on :4141. Remove env.M365_AGENT_ID to auto-provision the fenced-tool agent instead of attaching a published one."
+    },
+    "ato": {
+      "port": 4142,
+      "dataDir": ".m365-ato",
+      "env": {
+        "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        "M365_FRAMING_VARIANT": "relay_batch"
+      },
+      "notes": "Second tenant on :4142. Copy this block with `pnpm profiles add <name> --port 4143`."
+    }
+  }
+}

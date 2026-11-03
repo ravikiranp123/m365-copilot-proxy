@@ -120,13 +120,21 @@ export class ModelSession {
     const wantAgent = this.useAgent && useAgent;
 
     // Resolve agent ID lazily (persists across resets), only when wanted.
+    // M365_AGENT_ID bypasses auto-provisioning and attaches to an existing
+    // published Copilot Studio agent.
     if (wantAgent && this.cachedAgentId === undefined) {
-      try {
-        this.cachedAgentId = await getOrCreateAgent();
-        if (this.cachedAgentId) log.info(`Using agent: ${this.cachedAgentId}`);
-        else log.info("No agent available");
-      } catch {
-        this.cachedAgentId = null;
+      const configuredAgentId = process.env.M365_AGENT_ID?.trim();
+      if (configuredAgentId) {
+        this.cachedAgentId = configuredAgentId;
+        log.info(`Using configured agent: ${configuredAgentId}`);
+      } else {
+        try {
+          this.cachedAgentId = await getOrCreateAgent();
+          if (this.cachedAgentId) log.info(`Using agent: ${this.cachedAgentId}`);
+          else log.info("No agent available");
+        } catch {
+          this.cachedAgentId = null;
+        }
       }
     }
     const agentForTurn = wantAgent ? (this.cachedAgentId ?? undefined) : undefined;
@@ -177,6 +185,10 @@ export class ModelSession {
    */
   async refreshAgent(): Promise<boolean> {
     if (!this.useAgent) return false;
+
+    const configuredAgentId = process.env.M365_AGENT_ID?.trim();
+    if (configuredAgentId) return false;
+
     try {
       const fresh = await getOrCreateAgent({ forceRefresh: true });
       if (fresh !== this.cachedAgentId) {

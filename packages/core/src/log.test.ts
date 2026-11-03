@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { homedir } from "node:os";
+import { mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
@@ -30,5 +31,24 @@ describe("debug log and frame dump paths", () => {
     const m = await load({ M365_LOG_FILE: "/tmp/x/a.log", M365_FRAME_DIR: "" });
     expect(m.LOG_PATH).toBe("/tmp/x/a.log");
     expect(m.FRAME_DIR).toBe(join(CONFIG_DIR, "frames"));
+  });
+
+  it("tags every line with the profile when M365_PROFILE is set", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "m365-log-"));
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const m = await load({
+        M365_PROFILE: "ato",
+        M365_DEBUG: "1",
+        M365_LOG_STDOUT: "1",
+        M365_LOG_FILE: join(dir, "debug.log"),
+      });
+      m.createLogger("handler").info("hello");
+      const line = String(stdout.mock.calls.at(-1)?.[0]);
+      expect(line).toContain("[INFO] [ato] [handler] hello");
+    } finally {
+      stdout.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

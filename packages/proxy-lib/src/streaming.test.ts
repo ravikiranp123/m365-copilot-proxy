@@ -738,7 +738,7 @@ describe("follow-up turns and give-ups (Windows / pi, measured)", () => {
     messages.push({ role: "tool", tool_call_id: m1.tool_calls[0].id, content: "none" });
     const m2 = await ask(messages, pool);
     expect(scripted.texts).toHaveLength(3);
-    expect(scripted.texts[2]).toContain("Your tools are working");
+    expect(scripted.texts[2]).toContain("The tool request you made in the previous turn was executed");
     expect(scripted.texts[2]).not.toContain("you have not run any command yet");
     expect(JSON.parse(m2.tool_calls[0].function.arguments).command).toBe("py -m pip install fpdf2");
     scripted.queue = [];

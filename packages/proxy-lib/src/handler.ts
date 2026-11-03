@@ -48,6 +48,7 @@ import {
   type ParseResult,
 } from "@m365-copilot/core";
 import { ChatCompletionRequest } from "./schemas.js";
+import { localProfileName, profileNames, splitProfileModel } from "./profiles.js";
 import type { z } from "zod/v4";
 
 const log = createLogger("handler");
@@ -95,6 +96,11 @@ const MIDTASK_FORCE_PROMPT =
 // Collaboration reminder attached to every tool-result turn. The goal is not
 // to refresh tool schemas, but to reinforce the execution model at the exact
 // moment the model is deciding what to do with a real tool result.
+const TOOL_REMINDER_INTERVAL =
+  process.env.M365_TOOL_REMINDER_INTERVAL !== undefined
+    ? Number(process.env.M365_TOOL_REMINDER_INTERVAL)
+    : 0;
+
 function toolReminderForVariant(framingVariant: string): string {
   const relayLike = framingVariant.startsWith("relay");
 
@@ -168,6 +174,12 @@ const UNSTREAMED_BUDGET_WAIT_LIMIT_MS = 2 * 60_000;
 type ChatBody = z.infer<typeof ChatCompletionRequest>;
 type ParsedMessage = ChatBody["messages"][number];
 
+export interface MappedToolDefinition {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
 // --- Per-conversation state ---
 
 interface ConversationState {
@@ -178,6 +190,8 @@ interface ConversationState {
   /** Sent ahead of the next tool result when the proxy executed less than the
    *  model wrote last turn (see executedOnlyFirstNote). */
   pendingNote: string | null;
+  /** Latest OpenAI tool definitions seen for this conversation. */
+  toolDefinitions?: ChatBody["tools"];
   /** The model that last answered in this conversation. A different one (the
    *  Opus fallback, #18) can't continue the M365 conversation — it may need
    *  another scenario — so it starts a fresh one with the full history. */
@@ -257,6 +271,7 @@ export class SessionPool {
         existing.pendingNote = null;
       }
       existing.lastAccessedAt = Date.now();
+      if (tools) existing.toolDefinitions = tools;
       return existing;
     }
 
@@ -267,6 +282,7 @@ export class SessionPool {
       sentMessageCount: 0,
       toolReminderCounter: 0,
       pendingNote: null,
+      toolDefinitions: tools,
       lastAccessedAt: Date.now(),
     };
     this.conversations.set(fingerprint, state);
@@ -301,6 +317,14 @@ export class SessionPool {
 
   get size(): number {
     return this.conversations.size;
+  }
+
+  getTools(messages: ParsedMessage[], tools?: ChatBody["tools"]): MappedToolDefinition[] {
+    return (this.resolve(messages, tools).toolDefinitions ?? []).map((tool) => ({
+      name: tool.function.name,
+      description: tool.function.description,
+      inputSchema: tool.function.parameters,
+    }));
   }
 }
 
@@ -380,7 +404,24 @@ export async function handleChatCompletion(
   const conv = pool.resolve(body.messages, body.tools);
   const { session } = conv;
   const hasTools = body.tools && body.tools.length > 0 && body.tool_choice !== "none";
-  const requestedModel = body.model;
+
+  // Account profiles: clients may address a profile as `<profile>/<model>` or
+  // `m365/<profile>/<model>`. The standalone route forwards a cross-profile
+  // request to that profile's own proxy; anything that reaches this handler is
+  // served by this process, so strip the prefix before model/tone/budget
+  // resolution. Prefixing used to break metered-budget detection (`ato/claude-opus-5.5`
+  // isn't a known tone), which is why this happens before `meteredBudgetOf`.
+  const splitModel = splitProfileModel(body.model, profileNames());
+  const requestedProfile = splitModel.profile;
+  const requestedModel = splitModel.model;
+  if (requestedProfile) {
+    const local = localProfileName();
+    log.info(
+      local && requestedProfile !== local
+        ? `Request names profile ${requestedProfile} but this process serves ${local} — serving it locally`
+        : `Profile prefix ${requestedProfile} resolved locally`,
+    );
+  }
 
   // Priority access (§15, §24 F55, §26, issue #18). Once a budget is used up
   // every turn on it is refused until the reset, so don't start one: serve the
@@ -432,6 +473,9 @@ export async function handleChatCompletion(
   // Keyed on the model, not the tone, because one tone can serve two models.
   // M365_FRAMING_* still wins.
   let framingVariant = currentFramingVariant(defaultFramingForModel(model));
+  // Agent attachment is per-process now: the profile launcher sets
+  // M365_AGENT_ID from the registry (and deletes it for an agent-less profile),
+  // so no request-level profile gate is needed. M365_FORCE_AGENT still wins.
   let useToolAgent = requestUsesAgent(model, !!hasTools);
 
   // Format message: full prompt on first turn, delta on follow-ups.

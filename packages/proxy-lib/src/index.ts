@@ -1,9 +1,22 @@
 import { type ModelSessionOptions, getAvailableModels } from "@m365-copilot/core";
 import { ChatCompletionRequest } from "./schemas.js";
-import { SessionPool, handleChatCompletion } from "./handler.js";
+import { SessionPool, handleChatCompletion, type MappedToolDefinition } from "./handler.js";
 
-export { SessionPool, handleChatCompletion } from "./handler.js";
+export { SessionPool, handleChatCompletion, type MappedToolDefinition } from "./handler.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
+export {
+  DEFAULT_PROFILES_FILE,
+  localProfileName,
+  loadProfileRegistry,
+  profileNames,
+  profilePort,
+  profilesFilePath,
+  resolveDataDir,
+  splitProfileModel,
+  withProfileModels,
+  type ProfileConfig,
+  type ProfileRegistry,
+} from "./profiles.js";
 
 // Re-export tool utilities from core
 export {
@@ -23,6 +36,17 @@ export {
 /** Static body for `GET /health`. */
 export const HEALTH_PAYLOAD = { status: "ok" } as const;
 
+
+export function buildMcpToolsPayload(
+  pool: SessionPool,
+  messages: Array<{ role: string; content?: unknown }>,
+  tools?: unknown,
+) {
+  return {
+    tools: pool.getTools(messages as never, tools as never),
+  };
+}
+
 // Window/output hints surfaced to harnesses on /v1/models so they can size
 // context packing and output expectations. These are ADVERTISED hints only — M365
 // enforces its own limits server-side; the number here just stops harnesses from
@@ -38,7 +62,7 @@ const MAX_OUTPUT_TOKENS = Number(process.env.M365_MAX_OUTPUT_TOKENS) || 1_000_00
 export function buildModelsPayload() {
   const created = Math.floor(Date.now() / 1000);
   return {
-    object: "list",
+    object: "list" as const,
     data: getAvailableModels().map((id) => ({
       id,
       object: "model",

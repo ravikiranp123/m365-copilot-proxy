@@ -1,0 +1,22 @@
+{
+  "$schema": "./profiles.schema.json",
+  "profiles": {
+    "default": {
+      "port": 4141,
+      "dataDir": "~/.config/opencode-m365",
+      "env": {
+        "M365_AGENT_ID": "T_f414f719-113e-1130-d66e-3d94f19b57a9"
+      },
+      "notes": "Primary tenant on :4141. Remove env.M365_AGENT_ID to auto-provision the fenced-tool agent instead of attaching this published agent."
+    },
+    "ato": {
+      "port": 4142,
+      "dataDir": ".m365-ato",
+      "env": {
+        "M365_AGENT_ID": "T_26402370-428e-d802-c735-a2e224f9dea6",
+        "M365_FRAMING_VARIANT": "relay_batch"
+      },
+      "notes": "ATO tenant on :4142; MCP-enabled Copilot Studio agent."
+    }
+  }
+}
