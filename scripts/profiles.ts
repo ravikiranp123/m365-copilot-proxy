@@ -30,12 +30,14 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import YAML from "yaml";
 
 import {
   DEFAULT_PROFILES_FILE,
   loadProfileRegistry,
   profilesFilePath,
   resolveDataDir,
+  resolveDefaultKeyword,
   type ProfileConfig,
   type ProfileRegistry,
 } from "../packages/proxy-lib/src/profiles.js";
@@ -43,7 +45,6 @@ import {
 const ROOT = process.cwd();
 const PROXY_ENTRY = join(ROOT, "packages/proxy/bin/m365-proxy.mjs");
 const BUILT_ENTRY = join(ROOT, "packages/proxy/.output/server/index.mjs");
-const DEFAULT_PROFILE = "default";
 
 type Args = { _: string[]; flags: Record<string, string | boolean | string[]> };
 
@@ -117,21 +118,18 @@ function writeRegistry(registry: ProfileRegistry): void {
   writeFileSync(path, `${JSON.stringify(body, null, 2)}\n`);
 }
 
-function profileOrFail(name: string): ProfileConfig {
-  const registry = readRegistry();
-  const profile = registry.profiles[name];
-  if (!profile) {
-    fail(`unknown profile "${name}". Known: ${Object.keys(registry.profiles).join(", ") || "(none)"}`);
-  }
-  return profile;
-}
-
 function dataDirOf(name: string, profile: ProfileConfig): string {
   return resolveDataDir(profile.dataDir ?? defaultDataDir(name));
 }
 
 function defaultDataDir(name: string): string {
-  return name === DEFAULT_PROFILE ? "~/.config/opencode-m365" : `.m365-profiles/${name}`;
+  // Never inside the repo by default: credentials/MSAL-cache/logs are sensitive
+  // and an in-repo dir gets walked by anything scanning the project tree (editors,
+  // LLM tools, `git add -A` typos). No special case for any particular profile
+  // name (not even the configured default) — config/profiles.json already sets
+  // an explicit `dataDir` for anything that predates this; this is only the
+  // fallback for `pnpm profiles add <name>` with no --data-dir.
+  return `~/.config/opencode-m365/profiles/${name}`;
 }
 
 function pidFile(name: string, profile: ProfileConfig): string {
@@ -339,9 +337,10 @@ function cmdAdd(args: Args): void {
 }
 
 function cmdRm(args: Args): void {
-  const name = args._[1];
+  let name = args._[1];
   if (!name) fail("usage: pnpm profiles rm <name> [--purge]");
   const registry = readRegistry();
+  name = resolveDefaultKeyword(name, registry);
   const profile = registry.profiles[name];
   if (!profile) fail(`unknown profile "${name}"`);
 
@@ -407,7 +406,8 @@ async function cmdStart(args: Args): Promise<void> {
     fail(`missing ${BUILT_ENTRY}. Run \`pnpm build\` first.`);
   }
 
-  for (const name of names) {
+  for (let name of names) {
+    name = resolveDefaultKeyword(name, registry);
     const profile = registry.profiles[name];
     if (!profile) fail(`unknown profile "${name}"`);
     if (!Number.isInteger(profile.port)) fail(`profile "${name}" has no valid port`);
@@ -477,7 +477,8 @@ async function cmdStop(args: Args): Promise<void> {
   if (!target) fail("usage: pnpm profiles stop <name|all>");
   const registry = readRegistry();
   const names = target === "all" ? Object.keys(registry.profiles) : [target];
-  for (const name of names) {
+  for (let name of names) {
+    name = resolveDefaultKeyword(name, registry);
     const profile = registry.profiles[name];
     if (!profile) fail(`unknown profile "${name}"`);
     const pidPath = pidFile(name, profile);
@@ -521,7 +522,8 @@ async function cmdStatus(): Promise<void> {
     console.log("No profiles.");
     return;
   }
-  for (const name of names) {
+  for (let name of names) {
+    name = resolveDefaultKeyword(name, registry);
     const profile = registry.profiles[name];
     const pid = effectivePid(name, profile);
     const up = await healthy(profile.port);
@@ -549,9 +551,13 @@ async function cmdSync(args: Args): Promise<void> {
   const only = flagAll(args, "profile");
   const names = only.length ? only : Object.keys(registry.profiles);
 
-  const catalog: Array<{ profile: string; model: string }> = [];
+  // One provider per profile/port — never a single shared catalog rebuilt
+  // from whichever profiles happen to be running right now. A profile that
+  // isn't up during this sync must leave its own previously synced provider
+  // entry alone instead of vanishing from it (the bug this replaces).
+  const byProfile = new Map<string, { port: number; models: string[] }>();
   const aliases: Record<string, { alias: string; proxy: string; profile: string }> = {};
-  const running: Array<{ name: string; port: number }> = [];
+  let totalModels = 0;
 
   for (const name of names) {
     const profile = registry.profiles[name];
@@ -560,48 +566,48 @@ async function cmdSync(args: Args): Promise<void> {
       continue;
     }
     try {
-      const models = await modelsFor(name, profile);
+      const models = (await modelsFor(name, profile)).sort();
       const proxy = `http://localhost:${profile.port}`;
-      for (const model of models.sort()) {
-        catalog.push({ profile: name, model });
+      for (const model of models) {
         aliases[`${name}/${model}`] = { alias: model, proxy, profile: name };
       }
-      running.push({ name, port: profile.port });
-      console.log(`${name}: ${models.length} models`);
+      byProfile.set(name, { port: profile.port, models });
+      totalModels += models.length;
+      console.log(`${name}: ${models.length} models (:${profile.port})`);
     } catch (err: any) {
       console.warn(`${name}: skipped (${err.message}) — is it running? \`pnpm profiles start ${name}\``);
     }
   }
 
-  if (catalog.length === 0) {
+  if (byProfile.size === 0) {
     fail("no running profiles to sync; start one first");
   }
 
-  // The catalog points at one base URL; use a proxy that is actually up so
-  // namespaced IDs for the other profiles can be forwarded from it.
-  const explicitGateway = flag(args, "gateway");
-  const preferred =
-    running.find((r) => r.name === DEFAULT_PROFILE)?.port ?? running[0].port;
-  const gateway = (explicitGateway ?? `http://localhost:${preferred}`).replace(/\/$/, "");
+  // Host prefix for each profile's own URL (default: localhost). --gateway
+  // may still override it, e.g. --gateway http://192.168.1.5 for a remote
+  // host; any port/path on it is ignored since each profile has its own port.
+  const host = hostFromGateway(flag(args, "gateway"));
 
-  // pi: one provider on the gateway, every profile's models namespaced.
+  // pi: a dedicated provider per profile, each pointed straight at that
+  // profile's own port. No shared gateway, no namespaced model IDs, nothing
+  // to forward. Fully regenerated from the registry every sync.
   const piModels = {
-    providers: {
-      m365: {
-        api: "openai-completions",
-        apiKey: "not-needed",
-        baseUrl: `${gateway}/v1`,
-        compat: {
-          supportsDeveloperRole: false,
-          supportsReasoningEffort: false,
-          supportsUsageInStreaming: false,
+    providers: Object.fromEntries(
+      [...byProfile].map(([name, { port, models }]) => [
+        `m365-${name}`,
+        {
+          api: "openai-completions",
+          apiKey: "not-needed",
+          baseUrl: `${host}:${port}/v1`,
+          compat: {
+            supportsDeveloperRole: false,
+            supportsReasoningEffort: false,
+            supportsUsageInStreaming: false,
+          },
+          models: models.map((model) => ({ id: model, name: `${name}: ${model}` })),
         },
-        models: catalog.map(({ profile, model }) => ({
-          id: `${profile}/${model}`,
-          name: `${profile}: ${model}`,
-        })),
-      },
-    },
+      ]),
+    ),
   };
   mkdirSync(join(ROOT, ".pi-local/.pi/agent"), { recursive: true });
   writeFileSync(join(ROOT, ".pi-local/.pi/agent/models.json"), `${JSON.stringify(piModels, null, 2)}\n`);
@@ -609,15 +615,121 @@ async function cmdSync(args: Args): Promise<void> {
   writeFileSync(join(ROOT, ".m365-model-aliases.json"), `${JSON.stringify(aliases, null, 2)}\n`);
 
   console.log("");
-  console.log(`wrote ${catalog.length} models to .pi-local/.pi/agent/models.json (gateway ${gateway})`);
+  console.log(`wrote ${totalModels} models across ${byProfile.size} provider(s) to .pi-local/.pi/agent/models.json`);
   console.log(`wrote .m365-model-aliases.json`);
-  console.log(`example model id: ${catalog[0].profile}/${catalog[0].model}`);
+  for (const [name, { port, models }] of byProfile) {
+    if (models[0]) console.log(`  m365-${name} -> ${host}:${port}/v1 (e.g. ${models[0]})`);
+  }
+
+  syncOmp(byProfile, host);
+  syncOpencode(byProfile, host);
+}
+
+/** Host prefix (protocol + hostname, no port/path) used to build each
+ *  profile's own per-port URL. Defaults to localhost; --gateway may override
+ *  it with a remote host. Any port/path on the passed value is ignored —
+ *  each profile supplies its own port. */
+function hostFromGateway(explicit?: string): string {
+  if (!explicit) return "http://localhost";
+  try {
+    const u = new URL(explicit);
+    return `${u.protocol}//${u.hostname}`;
+  } catch {
+    return explicit.replace(/\/$/, "");
+  }
+}
+
+/** One entry shared by the OMP and opencode catalogs: both read a hint for
+ *  whether a model is a reasoning model, keyed off the same name patterns
+ *  `sync-omp-models.mjs` used to use standalone. */
+function isReasoningModel(model: string): boolean {
+  return model.includes("think-deeper") || model.includes("sol") || model === "auto" || model === "m365-copilot";
+}
+
+/** `~/.omp/agent/models.yml` — one provider per profile (`m365-<profile>`),
+ *  each pointed at that profile's own port. Only the profiles synced THIS run
+ *  are touched; every other provider key (another profile's, or an unrelated
+ *  provider entirely) is left exactly as it was. Supersedes the standalone
+ *  sync-omp-models.mjs. */
+function syncOmp(byProfile: Map<string, { port: number; models: string[] }>, host: string): void {
+  const modelsFile = join(homedir(), ".omp", "agent", "models.yml");
+  const existing = existsSync(modelsFile) ? (YAML.parse(readFileSync(modelsFile, "utf8")) ?? {}) : {};
+  existing.providers ??= {};
+
+  for (const [name, { port, models }] of byProfile) {
+    existing.providers[`m365-${name}`] = {
+      baseUrl: `${host}:${port}/v1`,
+      api: "openai-completions",
+      apiKey: "dummy",
+      models: models.map((model) => ({
+        id: model,
+        input: ["text", "image"],
+        reasoning: isReasoningModel(model),
+        thinkingLevelMap: { xhigh: "xhigh" },
+      })),
+    };
+  }
+
+  mkdirSync(dirname(modelsFile), { recursive: true });
+  writeFileSync(modelsFile, YAML.stringify(existing));
+  console.log(`wrote ${byProfile.size} provider(s) to ${modelsFile}`);
+}
+
+/** `~/.config/opencode/opencode.json` — one provider per profile
+ *  (`m365-<profile>`), each pointed at that profile's own port. Only the
+ *  profiles synced THIS run have their provider entry touched; every other
+ *  provider key (antigravity, gemini-web, another profile's m365-*, ...) and
+ *  any hand-set per-model fields (tool_call, limit) on an id that already
+ *  existed are left untouched. A `.backup-<timestamp>` is written first,
+ *  matching this file's existing manual-edit convention. */
+function syncOpencode(byProfile: Map<string, { port: number; models: string[] }>, host: string): void {
+  const configFile = join(homedir(), ".config", "opencode", "opencode.json");
+  if (!existsSync(configFile)) {
+    console.warn(`skipped opencode sync: ${configFile} not found`);
+    return;
+  }
+
+  const raw = readFileSync(configFile, "utf8");
+  const config = JSON.parse(raw);
+  config.provider ??= {};
+
+  for (const [name, { port, models }] of byProfile) {
+    const key = `m365-${name}`;
+    const prior = config.provider[key]?.models ?? {};
+
+    const modelEntries: Record<string, unknown> = {};
+    for (const model of models) {
+      // Keep any hand-tuned fields (tool_call, limit, name) for an id that
+      // already existed; only add bare defaults for a genuinely new one.
+      modelEntries[model] = prior[model] ?? {
+        name: `${name}: ${model}`,
+        tool_call: true,
+        limit: { context: 1_000_000, output: 1_000_000 },
+      };
+    }
+
+    config.provider[key] = {
+      ...config.provider[key],
+      name: config.provider[key]?.name ?? `Microsoft 365 Copilot (${name})`,
+      npm: config.provider[key]?.npm ?? "@ai-sdk/openai-compatible",
+      options: { ...config.provider[key]?.options, apiKey: "dummy", baseURL: `${host}:${port}/v1` },
+      models: modelEntries,
+    };
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  writeFileSync(`${configFile}.backup-${stamp}`, raw);
+  writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
+  console.log(`wrote ${byProfile.size} provider(s) to ${configFile} (backup: opencode.json.backup-${stamp})`);
 }
 
 function cmdEnv(args: Args): void {
-  const name = args._[1];
+  let name = args._[1];
   if (!name) fail("usage: pnpm profiles env <name>");
-  const profile = profileOrFail(name);
+  const registry = readRegistry();
+  name = resolveDefaultKeyword(name, registry);
+  const profile = registry.profiles[name];
+  if (!profile) fail(`unknown profile "${name}"`);
   const env = startEnv(name, profile);
   const keys = [
     "PORT",
@@ -653,7 +765,7 @@ Commands:
   start <name|all> [--foreground] Start the profile proxy(ies) in the background.
   stop <name|all>               Stop them.
   status                        Health check every profile.
-  sync [--gateway URL] [--profile name]  Write pi/opencode catalogs from running profiles.
+  sync [--gateway URL] [--profile name]  Write one pi/OMP/opencode provider per running profile/port.
   env <name>                    Print the environment the launcher uses.
 
 Model IDs are namespaced per profile: ato/gpt-6.1-sol, h2564/gpt-6.1-sol.

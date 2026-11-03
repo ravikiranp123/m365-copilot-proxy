@@ -6,8 +6,7 @@
   "scripts": {
     "dev": "pnpm --filter @m365-copilot/proxy dev",
     "build": "pnpm -r build",
-    "proxy": "tsx scripts/profiles.ts start default --foreground",
-    "proxy:ato": "tsx scripts/profiles.ts start ato --foreground",
+    "proxy": "tsx scripts/profiles.ts start ato --foreground",
     "profiles": "tsx scripts/profiles.ts",
     "pi": "bash scripts/pi-local.sh",
     "test": "pnpm test:unit",

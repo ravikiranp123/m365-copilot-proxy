@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolveDefaultKeyword, type ProfileRegistry } from "./profiles.js";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -69,3 +70,35 @@ describe("withProfileModels", () => {
     expect(new Set(out.data.map((m) => m.id)).size).toBe(out.data.length);
   });
 });
+
+describe("resolveDefaultKeyword", () => {
+  const registryWith = (profiles: string[], defaultProfile?: string): ProfileRegistry => ({
+    profiles: Object.fromEntries(profiles.map((name) => [name, { port: 4141 }])),
+    ...(defaultProfile ? { defaultProfile } : {}),
+  });
+
+  it('passes non-"default" names through unchanged', () => {
+    expect(resolveDefaultKeyword("ato", registryWith(["ato"]))).toBe("ato");
+  });
+
+  it('prefers a profile literally named "default" over defaultProfile', () => {
+    const registry = registryWith(["default", "ato"], "ato");
+    expect(resolveDefaultKeyword("default", registry)).toBe("default");
+  });
+
+  it('resolves via defaultProfile when no literal "default" profile exists', () => {
+    const registry = registryWith(["ato", "h2564"], "ato");
+    expect(resolveDefaultKeyword("default", registry)).toBe("ato");
+  });
+
+  it('throws when "default" is requested with no literal profile and no defaultProfile set', () => {
+    const registry = registryWith(["ato"]);
+    expect(() => resolveDefaultKeyword("default", registry)).toThrow(/no "defaultProfile" set/);
+  });
+
+  it("throws when defaultProfile points at an unregistered profile", () => {
+    const registry = registryWith(["ato"], "ghost");
+    expect(() => resolveDefaultKeyword("default", registry)).toThrow(/does not match any registered profile/);
+  });
+});
+

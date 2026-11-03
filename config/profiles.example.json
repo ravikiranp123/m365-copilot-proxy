@@ -1,5 +1,6 @@
 {
   "$schema": "./profiles.schema.json",
+  "defaultProfile": "default",
   "profiles": {
     "default": {
       "port": 4141,
@@ -11,12 +12,11 @@
     },
     "ato": {
       "port": 4142,
-      "dataDir": ".m365-ato",
       "env": {
         "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "M365_FRAMING_VARIANT": "relay_batch"
       },
-      "notes": "Second tenant on :4142. Copy this block with `pnpm profiles add <name> --port 4143`."
+      "notes": "Second tenant on :4142. Copy this block with `pnpm profiles add <name> --port 4143`. No dataDir set -> defaults to ~/.config/opencode-m365/profiles/<name>, never inside the repo."
     }
   }
 }

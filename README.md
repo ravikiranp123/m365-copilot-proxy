@@ -242,7 +242,7 @@ The proxy uses session reuse and delta messages — follow-up turns only send ne
 ### 5. Use as standalone proxy
 
 ```sh
-pnpm build && pnpm proxy          # profile-aware launcher, default profile on :4141
+pnpm build && pnpm proxy          # profile-aware launcher, starts config/profiles.json's "defaultProfile"
 # or
 npx m365-proxy 4141               # one process, no profile registry
 # or
@@ -278,7 +278,7 @@ pnpm profiles status
 pnpm profiles sync                 # write pi/opencode catalogs for every running profile
 ```
 
-`add` creates the profile's data dir (default `.m365-profiles/<name>`), copies
+`add` creates the profile's data dir (default `~/.config/opencode-m365/profiles/<name>` — never inside the repo), copies
 the credentials you pass with `--secrets` (or `secrets.<name>.json`), and records
 its port, optional `M365_AGENT_ID`, and any extra env. Prefer `--secrets` over
 `--email`/`--password` on the command line: inline flags land in your shell
@@ -717,9 +717,10 @@ findings dump and [§2](docs/hypotheses.md) for what we tried and didn't find.
 
 ## Config files
 
-Per-profile files live in that profile's data dir (default profile:
-`~/.config/opencode-m365/`; other profiles: `.m365-profiles/<name>/` or the
-`dataDir` in the registry). The registry itself is `config/profiles.json`.
+Per-profile files live in that profile's data dir — unset, it defaults to
+`~/.config/opencode-m365/profiles/<name>/` for every profile (no special case
+for whichever one is configured as "default"); set `dataDir` in the registry
+to override. The registry itself is `config/profiles.json`.
 
 | File | Description |
 |---|---|

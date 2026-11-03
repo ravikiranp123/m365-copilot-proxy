@@ -1,9 +1,10 @@
 {
   "$schema": "./profiles.schema.json",
+  "defaultProfile": "ato",
   "profiles": {
-    "default": {
+    "h2564": {
       "port": 4141,
-      "dataDir": "~/.config/opencode-m365",
+      "dataDir": "~/.config/opencode-m365/profiles/h2564",
       "env": {
         "M365_AGENT_ID": "T_f414f719-113e-1130-d66e-3d94f19b57a9"
       },
@@ -11,7 +12,7 @@
     },
     "ato": {
       "port": 4142,
-      "dataDir": ".m365-ato",
+      "dataDir": "~/.config/opencode-m365/profiles/ato",
       "env": {
         "M365_AGENT_ID": "T_26402370-428e-d802-c735-a2e224f9dea6",
         "M365_FRAMING_VARIANT": "relay_batch"

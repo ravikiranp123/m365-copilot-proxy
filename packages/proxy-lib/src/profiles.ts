@@ -31,7 +31,35 @@ export interface ProfileConfig {
 
 export interface ProfileRegistry {
   $schema?: string;
+  /** Profile name that the CLI's "default" shorthand (`pnpm profiles
+   *  start/stop/env default`, `pnpm proxy`) resolves to when no profile is
+   *  literally named "default". Lets a renamed profile (e.g. "default" ->
+   *  "ato") keep being the one scripts/docs target, by updating this one
+   *  value instead of hardcoding the name anywhere in code. */
+  defaultProfile?: string;
   profiles: Record<string, ProfileConfig>;
+}
+
+/**
+ * Resolve the CLI's "default" shorthand to an actual profile name. A profile
+ * literally named "default" always wins (back-compat); only when none exists
+ * does `registry.defaultProfile` apply. Non-"default" names pass through
+ * unchanged. Throws when "default" is requested but unresolvable, so callers
+ * can surface the message via their own CLI error convention.
+ */
+export function resolveDefaultKeyword(name: string, registry: ProfileRegistry): string {
+  if (name !== "default" || registry.profiles["default"]) return name;
+  const target = registry.defaultProfile;
+  if (!target) {
+    throw new Error(
+      'no profile named "default" and no "defaultProfile" set in the registry — ' +
+        'use an explicit profile name, or add "defaultProfile": "<name>"',
+    );
+  }
+  if (!registry.profiles[target]) {
+    throw new Error(`"defaultProfile": "${target}" does not match any registered profile`);
+  }
+  return target;
 }
 
 export const DEFAULT_PROFILES_FILE = "config/profiles.json";

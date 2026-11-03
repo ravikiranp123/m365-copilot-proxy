@@ -3,15 +3,25 @@
   "$id": "https://github.com/ravikiran/m365-copilot-proxy/config/profiles.schema.json",
   "title": "M365 Copilot proxy account profiles",
   "type": "object",
-  "required": ["profiles"],
+  "required": [
+    "profiles"
+  ],
   "properties": {
-    "$schema": { "type": "string" },
+    "$schema": {
+      "type": "string"
+    },
+    "defaultProfile": {
+      "type": "string",
+      "description": "Profile name that `pnpm profiles start/stop/env default` (and `pnpm proxy`) resolve to when no profile is literally named \"default\". Must match a key under \"profiles\"."
+    },
     "profiles": {
       "type": "object",
       "description": "One entry per M365 identity. The key is the model-ID prefix (ato/gpt-6.1-sol).",
       "additionalProperties": {
         "type": "object",
-        "required": ["port"],
+        "required": [
+          "port"
+        ],
         "properties": {
           "port": {
             "type": "integer",
@@ -21,19 +31,25 @@
           },
           "dataDir": {
             "type": "string",
-            "description": "Credentials, MSAL cache, browser profile and logs. Relative to the repo root; ~ is expanded."
+            "description": "Credentials, MSAL cache, browser profile and logs. ~ is expanded; a relative path resolves against the repo root (not recommended \u2014 secrets end up inside the project tree). Default when unset: ~/.config/opencode-m365 for the \"default\" profile, ~/.config/opencode-m365/profiles/<name> for any other \u2014 always outside the repo."
           },
           "env": {
             "type": "object",
-            "additionalProperties": { "type": "string" },
+            "additionalProperties": {
+              "type": "string"
+            },
             "description": "Extra environment for the profile's proxy, e.g. M365_AGENT_ID or M365_FRAMING_VARIANT. Values win over .env."
           },
           "models": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Optional allow-list used by `pnpm profiles sync`; absent means every advertised model."
           },
-          "notes": { "type": "string" }
+          "notes": {
+            "type": "string"
+          }
         },
         "additionalProperties": false
       }
