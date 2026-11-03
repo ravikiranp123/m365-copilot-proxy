@@ -1,0 +1,29 @@
+{
+  "$schema": "file:./profiles.schema.json",
+  "profiles": {
+    "ato": {
+      "env": {
+        "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        "M365_FRAMING_VARIANT": "relay_batch"
+      },
+      "models": [
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "claude-opus",
+        "claude-sonnet-5.5"
+      ],
+      "notes": "4142 ATO tenant; MCP enabled when M365_AGENT_ID is set."
+    },
+    "user2": {
+      "env": {
+        "M365_FRAMING_VARIANT": "relay_batch"
+      },
+      "models": [
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "m365-copilot"
+      ],
+      "notes": "Included scenario only; agent-less path."
+    }
+  }
+}
