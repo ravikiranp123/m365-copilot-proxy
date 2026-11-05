@@ -1,10 +1,12 @@
 {
-  "$schema": "file:./profiles.schema.json",
+  "$schema": "./profiles.schema.json",
+  "defaultProfile": "default",
   "profiles": {
-    "ato": {
+    "default": {
+      "port": 4141,
+      "dataDir": "~/.config/opencode-m365",
       "env": {
-        "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        "M365_FRAMING_VARIANT": "relay_batch"
+        "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
       },
       "models": [
         "gpt-6-sol",
@@ -12,18 +14,15 @@
         "claude-opus",
         "claude-sonnet-5.5"
       ],
-      "notes": "4142 ATO tenant; MCP enabled when M365_AGENT_ID is set."
+      "notes": "Primary tenant on :4141. Remove env.M365_AGENT_ID to auto-provision the fenced-tool agent instead of attaching a published one."
     },
-    "user2": {
+    "ato": {
+      "port": 4142,
       "env": {
+        "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "M365_FRAMING_VARIANT": "relay_batch"
       },
-      "models": [
-        "gpt-6-sol",
-        "gpt-6.1-sol",
-        "m365-copilot"
-      ],
-      "notes": "Included scenario only; agent-less path."
+      "notes": "Second tenant on :4142. Copy this block with `pnpm profiles add <name> --port 4143`. No dataDir set -> defaults to ~/.config/opencode-m365/profiles/<name>, never inside the repo."
     }
   }
 }

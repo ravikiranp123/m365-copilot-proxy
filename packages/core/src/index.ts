@@ -35,6 +35,15 @@ export {
 export { getOrCreateAgent, getEnvironmentUrl, environmentUrlFromName } from "./agent.js";
 
 export {
+  mcpBridge,
+  McpBridge,
+  type BridgeCall,
+  type BridgeResult,
+  type BridgeToolDefinition,
+} from "./mcp-bridge.js";
+export { startMcpServer } from "./mcp-server.js";
+
+export {
   decodeJwt,
   getToneForModel,
   getAvailableModels,

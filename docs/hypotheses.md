@@ -5640,3 +5640,100 @@ bursty. Falsifier: fresh-conversation retries failing at the same rate as same-c
 Cost to watch: each such retry starts a conversation, which is what the F13 thread-rate throttle
 counts. Bounded to one per dropped turn, but on a bad `InternalError` day it adds up; the same
 afternoon's benching (one conversation per run) did trip `PerUserThrottled`.
+
+## 13. ato (4142) Studio-agent native MCP connector — static path confirmed (Nov 3 2026)
+
+Graduated from MCP_PROXY_NOTES.md / SESSION_NOTES_2026-11-03.md /
+RESEARCH_SUMMARY_FINAL.md (root-level scratch notes, folded in here and
+removed per this file's own promotion convention — see AGENTS.md).
+
+**Confirmed 🟢 — Fork A (static Studio-agent connector), on the ato tenant only.**
+The `ato` profile's published Copilot Studio agent (`T_26402370-428e-d802-c735-a2e224f9dea6`,
+"ATO Standard": `GenerativeActionsEnabled=true`, `isAgentConnectable=true`, a WT MCP
+connector attached, `modelNameHint=GPT5Reasoning`) genuinely invokes MCP tools
+server-side: a turn asking it to use the WT tool produced a real `tools/call`
+round-trip (`WT-get_portfolio` → `404 Not Found` from the WT *backend*, not a
+proxy/orchestration failure — MCP execution reached the real endpoint and
+failed downstream, not in Copilot Studio). This is **Fork A** from
+§8.10/§8.11/§12.1 (the full-Dataverse-bot path parked for licensing) — except
+licensing turned out to already be present on this one tenant, reopening
+exactly the fork §12.1 flagged as tenant-dependent.
+
+Also observed this session: `claude-sonnet-5.5`, `claude-sonnet-4.6`,
+`claude-opus-5.5`, `claude-opus-4.8`, `gpt-5.5`, `gpt-5.6`, `gpt-6-sol`,
+`gpt-6.1-sol`, `gpt-6-think-deeper` all self-ID correctly on 4142 (GPT-6
+variants often self-report as GPT-5 chat, consistent with prior findings);
+Sonnet 5.5's priority-access budget hit 0 while Opus's decremented normally —
+not yet proven whether model quotas are keyed to the invoking user identity or
+the Studio agent itself.
+
+**Operationally confirmed (Nov 4, operator-reported):** the agent's MCP
+connector proxies to `localhost:8000` via an existing persistent (token-based)
+cloudflared tunnel — whatever tools `localhost:8000/mcp` exposes is what the
+agent sees. No new tunnel or Studio reconfiguration is needed to test this
+path; swapping the local server's tool list is sufficient.
+
+**Unresolved going in: the proxy-integration bridge.** A static connector means
+*Microsoft's own orchestrator* calls `tools/call` directly against whatever
+server the connector points at — the proxy is not in that call's path at all.
+For the project's actual tools (bash/edit/write, which must execute in the
+**harness's** local environment, not a server the proxy owns), something has
+to bridge "Microsoft's server-side POST" back to "the harness's pending
+OpenAI tool_calls turn" — two different request/response timelines
+(MCP_PROXY_NOTES.md's open question #3). Phase 1 below tests this gap
+directly instead of assuming it.
+
+### Phase 1 probe result
+
+**Confirmed 🟢🟢 — real native tool execution, ground-truth verified, model=claude-sonnet-5 (Nov 4 2026).**
+Stood up a minimal MCP Streamable-HTTP server (`scripts/mcp-sidecar/server.mjs`)
+on `localhost:8000/mcp` — exactly where the operator confirmed the ato agent's
+WT connector already points, via the existing persistent cloudflared tunnel
+(no tunnel/Studio changes needed). Drove one real production turn through
+`CopilotSession` (the same class `ModelSession`/the proxy itself uses, not a
+bespoke raw-WS script) asking `claude-sonnet-5` (`Claude_Sonnet_5` tone, paid
+scenario) to call a single read-only tool, `get_magic_sentinel`, returning a
+freshly-generated per-run sentinel string.
+
+Evidence, in order:
+- Server received a genuine MCP handshake from Microsoft's own client:
+  `User-Agent: CopilotStudio PowerFx/1.99.0-local`,
+  `clientInfo: {name:"mcs", agentName:"ATO Standard", agentAuthenticationMode:"Integrated",
+  appId:"6d85d523-9c3e-43d0-8bf7-a7ddedc8a315", cdsBotId:"80e80509-96d6-f111-a05b-6045bd0a939d",
+  channelId:"m365copilot"}` — `initialize` → `notifications/initialized` →
+  `tools/list` → **`tools/call {"name":"get_magic_sentinel"}`**, ~11.5s after
+  the chat turn was sent.
+- **Ground truth, not model self-report:** the server's own hit log recorded
+  the `tools/call`, independent of anything the model said back.
+- M365's own structured turn `result.message` carried the exact sentinel
+  (`"SENTINEL-GUUETZ1W-PHASE1 "`), and `contentOrigin:"CustomEngineCopilot"`
+  confirms the turn routed through the Studio agent, not a plain-chat fallback.
+- Cost: 1 of 600 messages on the `ato` conversation quota, one turn, ~20s wall.
+
+**This settles Phase 1's forking question for ato.** The static connector
+(Fork A) is real, works with Claude Sonnet 5 specifically (not just the GPT/WT
+combination from Nov 3), and needs zero sideloading or dynamic in-band
+LocalMCP work — the agent was already wired. **Re-running the old
+`da-app/localmcp-probe.mjs` (Fork B, dynamic LocalMcpDiscovery) is now
+lower priority for ato**: Fork A already delivers native execution on the one
+tenant that has it, and §12.9's server-side invocation block for Fork B was
+never account-specific evidence that it works anywhere.
+
+**Still open — the bridge problem, now sharpened by this result.** The
+`tools/call` landed on *our* standalone Node process, not inside the proxy's
+request lifecycle: Microsoft's orchestrator → our MCP server → straight back
+to Microsoft, no harness in the loop. For harness tools (bash/edit/write) that
+must execute on the *caller's* machine, the MCP server a Studio connector talks
+to must itself hold open (or poll) each `tools/call` until the real OpenAI
+harness round-trips a result for that conversation — the proxy's
+`SessionPool`/conversation-fingerprint machinery is the natural place to key
+that correlation, but nothing today connects `tools.post.ts` (a one-shot tool
+listing endpoint, confirmed to have no caller) to an actual long-lived MCP
+server process. That bridge is the next concrete piece of work, not a new
+probe.
+
+**Operational note for that work:** the connector's target (`localhost:8000/mcp`)
+is a single shared endpoint behind one persistent tunnel — swapping which
+local process listens there is sufficient to change what the ato agent can
+call; no Studio-side reconfiguration is needed per iteration.
+

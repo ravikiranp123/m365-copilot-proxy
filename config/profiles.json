@@ -1,29 +1,34 @@
 {
-  "$schema": "file:./profiles.schema.json",
+  "$schema": "./profiles.schema.json",
+  "defaultProfile": "ato",
   "profiles": {
-    "ato": {
+    "h2564": {
+      "port": 4141,
+      "dataDir": "~/.config/opencode-m365/profiles/h2564",
       "env": {
-        "M365_AGENT_ID": "T_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        "M365_FRAMING_VARIANT": "relay_batch"
+        "M365_AGENT_ID": "T_f414f719-113e-1130-d66e-3d94f19b57a9"
       },
-      "models": [
-        "gpt-6-sol",
-        "gpt-6.1-sol",
-        "claude-opus",
-        "claude-sonnet-5.5"
-      ],
-      "notes": "4142 ATO tenant; MCP enabled when M365_AGENT_ID is set."
+      "notes": "Primary tenant on :4141. Remove env.M365_AGENT_ID to auto-provision the fenced-tool agent instead of attaching this published agent."
     },
-    "user2": {
+    "ato": {
+      "port": 4142,
+      "dataDir": "~/.config/opencode-m365/profiles/ato",
       "env": {
-        "M365_FRAMING_VARIANT": "relay_batch"
+        "M365_AGENT_ID": "T_26402370-428e-d802-c735-a2e224f9dea6"
       },
-      "models": [
-        "gpt-6-sol",
-        "gpt-6.1-sol",
-        "m365-copilot"
-      ],
-      "notes": "Included scenario only; agent-less path."
+      "notes": "ATO tenant on :4142; MCP-enabled Copilot Studio agent."
+    },
+    "fritz": {
+      "port": 4143,
+      "dataDir": "~/.config/opencode-m365/profiles/fritz"
+    },
+    "t10011": {
+      "port": 4144,
+      "dataDir": "~/.config/opencode-m365/profiles/t10011",
+      "env": {
+        "M365_AGENT_ID": "T_26402370-428e-d802-c735-a2e224f9dea6"
+      },
+      "notes": "ATO tenant on :4144; Free user; shares the ATO Standard agent (WT tools) via its titleId."
     }
   }
 }

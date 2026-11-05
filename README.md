@@ -242,12 +242,16 @@ The proxy uses session reuse and delta messages — follow-up turns only send ne
 ### 5. Use as standalone proxy
 
 ```sh
-npx m365-proxy 4141
+pnpm build && pnpm proxy          # profile-aware launcher, starts config/profiles.json's "defaultProfile"
 # or
-pnpm run dev
+npx m365-proxy 4141               # one process, no profile registry
+# or
+pnpm run dev                      # Nitro dev server on :4141
 ```
 
 Then point any OpenAI-compatible client at `http://localhost:4141/v1`.
+`pnpm proxy` reads `config/profiles.json`, so it picks up the default profile's
+agent and writes its own per-profile log; the raw launchers do not.
 
 #### Temporary chats
 
@@ -257,7 +261,53 @@ the Copilot history sidebar while multi-turn context still works for the live
 conversation. Set `M365_SAVE_HISTORY=1` before starting the proxy only if you
 deliberately want proxy chats saved in Copilot history.
 
-### 6. Run on NixOS (systemd service)
+### 6. Multiple accounts (profiles)
+
+One M365 identity per proxy process: credentials, MSAL cache, browser profile,
+tool agent and debug log all belong to that profile. Profiles are declared in
+`config/profiles.json` (committed template: `config/profiles.example.json`) and
+managed with the `pnpm profiles` CLI.
+
+```sh
+pnpm profiles list                 # ports, liveness, agent, credentials
+pnpm profiles add h2564 --port 4143 --secrets secrets.h2564.json
+pnpm profiles add new-user --port 4144 --email user@example.com --password '…' --mfa-secret ABC…
+pnpm build
+pnpm profiles start all            # or: pnpm profiles start h2564
+pnpm profiles status
+pnpm profiles sync                 # write pi/opencode catalogs for every running profile
+```
+
+`add` creates the profile's data dir (default `~/.config/opencode-m365/profiles/<name>` — never inside the repo), copies
+the credentials you pass with `--secrets` (or `secrets.<name>.json`), and records
+its port, optional `M365_AGENT_ID`, and any extra env. Prefer `--secrets` over
+`--email`/`--password` on the command line: inline flags land in your shell
+history and are visible to other local users via `ps`. Start each profile's proxy
+on its own port; the launcher sets `M365_PROFILE`, `M365_LOG_FILE`,
+`M365_SECRETS_FILE`, `M365_CACHE_FILE` and `M365_BROWSER_PROFILE` for you.
+
+**Model IDs are namespaced per profile.** A client can send:
+
+```
+ato/gpt-6.1-sol
+h2564/gpt-6.1-sol
+new-user/gpt-6.1-sol
+```
+
+`GET /v1/models` advertises the bare IDs (the local profile) plus a
+`<profile>/<model>` copy for every registered profile. Any proxy port forwards a
+prefixed model to the proxy that owns that profile, so **one base URL serves
+every account** — point pi/opencode at `http://localhost:4141/v1` and use
+`ato/…`, `h2564/…`, etc. The legacy `m365/<profile>/<model>` form is still
+accepted. An unregistered prefix returns a 400 that names the known profiles; a
+registered-but-stopped profile returns a 502 that tells you to start it.
+
+Logs are per profile (`<data dir>/debug.log`) and every line is tagged with
+`[<profile>]`, so two proxies no longer interleave indistinguishable lines in
+one file. `M365_PROFILES_FILE` points the CLI and proxy at a different registry;
+`M365_PROFILE` is the process's own profile name.
+
+### 7. Run on NixOS (systemd service)
 
 The proxy is a [Nitro](https://nitro.build/) service. The flake exposes a package
 (built from the workspace via [pnpm2nix](https://github.com/cramt/pnpm2nix)) and a NixOS
@@ -597,7 +647,9 @@ Three token scopes are acquired:
 | Variable | Description |
 |---|---|
 | `M365_DEBUG` | Set to `1` to enable debug logging to `~/.config/opencode-m365/debug.log` (truncated payloads) |
-| `M365_LOG_FILE` | Debug log name, relative to `~/.config/opencode-m365/` (default `debug.log`; an absolute path is used as is). `M365_LOG_FILE=my/log.log` logs to `~/.config/opencode-m365/my/log.log`. |
+| `M365_LOG_FILE` | Debug log name, relative to `~/.config/opencode-m365/` (default `debug.log`; an absolute path is used as is). `M365_LOG_FILE=my/log.log` logs to `~/.config/opencode-m365/my/log.log`. The profile launcher pins this to `<profile data dir>/debug.log`. |
+| `M365_PROFILE` | The profile this process serves. Set by `pnpm profiles start`; also prefixes every debug-log line with `[<profile>]`. Unset keeps the old untagged format. |
+| `M365_PROFILES_FILE` | Path to the profile registry (default `config/profiles.json`, relative to the repo root). Used by the proxy's gateway routing and by the `pnpm profiles` CLI. |
 | `M365_TRACE` | Set to `1` for full, untruncated debug logging (every WS frame/prompt/response) — implies `M365_DEBUG`. For reverse engineering. |
 | `M365_LOG_STDOUT` | Set to `1` to mirror debug lines to the proxy's stdout as well as the log file, so you can watch a run without tailing it in a second terminal. Needs `M365_DEBUG` or `M365_TRACE` — on its own it logs nothing. |
 | `M365_DUMP_FRAMES` | Set to `1` to write every WebSocket frame (both directions) to `~/.config/opencode-m365/frames/<requestId>.ndjson`. For offline diffing of new M365 fields. |
@@ -624,6 +676,9 @@ Three token scopes are acquired:
 | `M365_CACHE_FILE` | Override MSAL token cache location |
 | `M365_SECRETS_FILE` | Override credentials file location |
 | `CHROMIUM_PATH` | Path to Chromium binary for automated login |
+| `M365_ALLOW_NATIVE_TOOLS` | Set to `1` to enable the native MCP tool-calling bridge alongside the default fenced-bash path. Requires a profile with a Copilot Studio agent whose connector already targets `M365_MCP_PORT` (today: the `ato` profile — see [docs/plan/mcp-sidecar-4142.md](docs/plan/mcp-sidecar-4142.md)). When a request carries `tools`, M365's own native tool invocation is bridged to the OpenAI `tool_calls` the harness expects instead of the fenced-bash parser; everything else (profiles, framing, retries) is unchanged. Off by default — fenced-bash remains the default everywhere until the exit criteria in the plan doc are met. |
+| `M365_MCP_PORT` | Port the native-tools MCP bridge listens on when `M365_ALLOW_NATIVE_TOOLS=1` (default `8000` — matches the `ato` Studio agent connector's existing target). |
+| `M365_MCP_CALL_TIMEOUT_MS` | How long the MCP bridge waits for the harness to deliver a tool result before answering M365's `tools/call` with a synthetic error (default `170000`). |
 
 ### Usage / context-window % in responses
 
@@ -665,15 +720,20 @@ findings dump and [§2](docs/hypotheses.md) for what we tried and didn't find.
 
 ## Config files
 
-All stored in `~/.config/opencode-m365/`:
+Per-profile files live in that profile's data dir — unset, it defaults to
+`~/.config/opencode-m365/profiles/<name>/` for every profile (no special case
+for whichever one is configured as "default"); set `dataDir` in the registry
+to override. The registry itself is `config/profiles.json`.
 
 | File | Description |
 |---|---|
+| `config/profiles.json` | Profile registry: ports, data dirs, per-profile env/agent (template: `config/profiles.example.json`) |
 | `secrets.json` | Login credentials (email, password, mfaSecret) |
 | `msal-cache.json` | MSAL token cache (auto-managed) |
 | `agent-id.json` | Cached Copilot Studio agent ID |
-| `debug.log` | Debug log (when `M365_DEBUG=1`; renamed by `M365_LOG_FILE`) |
+| `debug.log` | Per-profile debug log (when `M365_DEBUG=1`; renamed by `M365_LOG_FILE`) |
 | `frames/` | WebSocket frame dumps (when `M365_DUMP_FRAMES=1`; moved by `M365_FRAME_DIR`) |
+| `proxy.pid` / `proxy.log` | Written by `pnpm profiles start`: the process id and its stdout/stderr |
 
 ## Development
 
@@ -683,6 +743,8 @@ pnpm build            # Build all packages
 pnpm run dev          # Start standalone proxy on :4141
 pnpm run test:unit    # Run vitest unit tests (no auth/network)
 pnpm run test:live    # Run live integration tests against M365
+pnpm profiles list    # Account profiles (see "Multiple accounts" above)
+pnpm profiles sync    # Write pi/opencode catalogs for running profiles
 ```
 
 ## Known limitations

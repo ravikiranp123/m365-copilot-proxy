@@ -21,6 +21,11 @@ const enabled = !!process.env.M365_DEBUG || trace;
 // not a protocol channel.
 const stdoutEnabled = !!process.env.M365_LOG_STDOUT;
 
+// The profile launcher sets M365_PROFILE so a shared log (or a terminal tailing
+// several proxies) says which account produced a line. Unset keeps the old
+// format byte-for-byte.
+const profile = process.env.M365_PROFILE?.trim();
+
 function timestamp(): string {
   return new Date().toISOString();
 }
@@ -30,7 +35,8 @@ function write(level: string, component: string, ...args: unknown[]) {
   const msg = args
     .map((a) => (typeof a === "string" ? a : JSON.stringify(a, null, 2)))
     .join(" ");
-  const line = `[${timestamp()}] [${level}] [${component}] ${msg}\n`;
+  const scope = profile ? `[${profile}] [${component}]` : `[${component}]`;
+  const line = `[${timestamp()}] [${level}] ${scope} ${msg}\n`;
   if (stdoutEnabled) process.stdout.write(line);
   try {
     mkdirSync(LOG_DIR, { recursive: true });

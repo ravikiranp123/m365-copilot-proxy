@@ -46,8 +46,10 @@ import {
   fetchImageBytes,
   type CapturedImage,
   type ParseResult,
+  mcpBridge,
 } from "@m365-copilot/core";
 import { ChatCompletionRequest } from "./schemas.js";
+import { localProfileName, profileNames, splitProfileModel } from "./profiles.js";
 import type { z } from "zod/v4";
 
 const log = createLogger("handler");
@@ -173,6 +175,10 @@ const UNSTREAMED_BUDGET_WAIT_LIMIT_MS = 2 * 60_000;
 type ChatBody = z.infer<typeof ChatCompletionRequest>;
 type ParsedMessage = ChatBody["messages"][number];
 
+/** Minimal shape of session.run()'s CopilotStream the native MCP bridge
+ *  needs, so this file doesn't have to import core's full stream type. */
+type NativeCopilotStream = AsyncIterable<string> & { fullText?: string };
+
 export interface MappedToolDefinition {
   name: string;
   description?: string;
@@ -195,6 +201,16 @@ interface ConversationState {
    *  Opus fallback, #18) can't continue the M365 conversation — it may need
    *  another scenario — so it starts a fresh one with the full history. */
   servedModel?: string;
+  /** Native MCP bridge (M365_ALLOW_NATIVE_TOOLS=1): the M365 stream for a
+   *  turn that may span several tool round-trips, kept alive across the HTTP
+   *  requests that deliver each one. */
+  nativeStream?: NativeCopilotStream;
+  nativeIterator?: AsyncIterator<string>;
+  nativeFullText?: string;
+  /** The bridge's internal id for a tool call waiting on the harness's
+   *  result, and the OpenAI tool_call_id the harness was given for it. */
+  pendingBridgeCallId?: string;
+  pendingBridgeToolCallId?: string;
 }
 
 /**
@@ -335,6 +351,17 @@ function simpleHash(str: string): string {
   return String(hash);
 }
 
+/** Map OpenAI tool definitions to the shape the native MCP bridge serves via
+ *  tools/list (same fields SessionPool.getTools exposes for the catalog
+ *  route, factored out so produceNative can call it directly per-request). */
+function mapToolDefinitions(tools?: ChatBody["tools"]): MappedToolDefinition[] {
+  return (tools ?? []).map((tool) => ({
+    name: tool.function.name,
+    description: tool.function.description,
+    inputSchema: tool.function.parameters,
+  }));
+}
+
 /** Parse a tool-mode reply, with the document guard applied.
  *
  *  The shell-routing parser turns every ```bash block into a tool call, so a
@@ -403,7 +430,25 @@ export async function handleChatCompletion(
   const conv = pool.resolve(body.messages, body.tools);
   const { session } = conv;
   const hasTools = body.tools && body.tools.length > 0 && body.tool_choice !== "none";
-  const requestedModel = body.model;
+  const nativeToolsEnabled = !!hasTools && process.env.M365_ALLOW_NATIVE_TOOLS === "1";
+
+  // Account profiles: clients may address a profile as `<profile>/<model>` or
+  // `m365/<profile>/<model>`. The standalone route forwards a cross-profile
+  // request to that profile's own proxy; anything that reaches this handler is
+  // served by this process, so strip the prefix before model/tone/budget
+  // resolution. Prefixing used to break metered-budget detection (`ato/claude-opus-5.5`
+  // isn't a known tone), which is why this happens before `meteredBudgetOf`.
+  const splitModel = splitProfileModel(body.model, profileNames());
+  const requestedProfile = splitModel.profile;
+  const requestedModel = splitModel.model;
+  if (requestedProfile) {
+    const local = localProfileName();
+    log.info(
+      local && requestedProfile !== local
+        ? `Request names profile ${requestedProfile} but this process serves ${local} — serving it locally`
+        : `Profile prefix ${requestedProfile} resolved locally`,
+    );
+  }
 
   // Priority access (§15, §24 F55, §26, issue #18). Once a budget is used up
   // every turn on it is refused until the reset, so don't start one: serve the
@@ -445,12 +490,6 @@ export async function handleChatCompletion(
   // agent-less path. The old `/claude/i.test(model)` + `magic` fallback split a
   // claude-* string into GPT-tone + agent-suppressed — the confab quadrant we
   // observed. One resolved tone drives both.
-  // --- MCP sidecar: parse optional model prefix m365/<profile>/<model> ---
-  let __profileName: string | undefined;
-  {
-    const m = /^m365\/([^\/]+)\/(.+)$/.exec(model);
-    if (m) { __profileName = m[1]; model = m[2]; }
-  }
   let tone = getToneForModel(model);
   // Framing default follows the MODEL (defaultFramingForModel): the Claude,
   // GPT-6 and GPT-6 Sol tones get a user-voice relay (Sonnet reads the
@@ -461,12 +500,10 @@ export async function handleChatCompletion(
   // Keyed on the model, not the tone, because one tone can serve two models.
   // M365_FRAMING_* still wins.
   let framingVariant = currentFramingVariant(defaultFramingForModel(model));
+  // Agent attachment is per-process now: the profile launcher sets
+  // M365_AGENT_ID from the registry (and deletes it for an agent-less profile),
+  // so no request-level profile gate is needed. M365_FORCE_AGENT still wins.
   let useToolAgent = requestUsesAgent(model, !!hasTools);
-  // --- MCP sidecar: enable agent only for ato profile with configured agent ID (unless forced) ---
-  if (process.env.M365_FORCE_AGENT !== "1") {
-    if (typeof __profileName === "string" && __profileName !== "ato") { useToolAgent = false; }
-    if (__profileName === "ato" && !process.env.M365_AGENT_ID) { useToolAgent = false; }
-  }
 
   // Format message: full prompt on first turn, delta on follow-ups.
   // M365 is stateful — it remembers everything from prior turns,
@@ -648,6 +685,20 @@ export async function handleChatCompletion(
         noteRequestOutcome(true, convId);
         log.info(`Upstream Throttled (${copilotStream.result.errorCode ?? "no errorCode"}) — 429, no retry`);
         return { error: throttledResponse(copilotStream.result) };
+      }
+
+      // The account's M365 Copilot license simply doesn't cover this
+      // model/tone (ForbiddenRequest: InvalidCopilotLicense /
+      // PremiumModelUnavailableForLicense / ClaudeUnavailableForLicense — F46).
+      // This is deterministic and about the account, not a transient empty
+      // reply, an agent problem, or something a "Please continue." retry can
+      // fix — every retry returns the identical refusal. Checked BEFORE the
+      // agent-fallback/InternalError/empty-reply handling below so it can't be
+      // mistaken for any of those and silently burn MAX_RETRIES.
+      if (copilotStream.result?.value === "ForbiddenRequest") {
+        noteRequestOutcome(false, convId); // an answer (a refusal), not a throttle
+        log.info(`Upstream ForbiddenRequest (${copilotStream.result.errorCode ?? "no errorCode"}) — this account's license doesn't cover ${model}, failing fast`);
+        return { error: licenseDeniedResponse(model, copilotStream.result) };
       }
 
       // A tone whose agent route serves only on a premium account came back as
@@ -842,10 +893,16 @@ export async function handleChatCompletion(
   // For streaming we return the SSE stream FIRST and run produce() INSIDE it, so the
   // client gets HTTP 200 + a role chunk + heartbeats immediately instead of waiting
   // out the whole (up to ~160s) M365 turn and risking a read-timeout.
+  interface RenderedToolCall {
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }
+
   type Produced =
     | { kind: "error"; resp: Response }
     | { kind: "text"; text: string }
-    | { kind: "tools"; toolCalls: ReturnType<typeof parseToolCalls>["toolCalls"] };
+    | { kind: "tools"; toolCalls: RenderedToolCall[] };
 
   // `onDelta` streams text to the client live (non-tool path only — see produce's
   // caller). Tool mode ignores it: the raw text is parsed for tool-call fences and
@@ -999,12 +1056,126 @@ export async function handleChatCompletion(
   }
   } // end produce()
 
+  /**
+   * Native MCP tool-calling path (M365_ALLOW_NATIVE_TOOLS=1, hasTools only).
+   * Bridges M365's own native tool invocation (via the Studio agent's MCP
+   * connector hitting our local MCP server, packages/core/src/mcp-server.ts)
+   * to the OpenAI tool_calls round-trip the harness actually speaks.
+   *
+   * One logical M365 turn can span several tool round-trips entirely inside
+   * ONE `session.run()` stream; each individual tool invocation still needs a
+   * real round-trip to the CALLER's machine (the harness's bash/edit/etc.), so
+   * the stream is kept alive across MULTIPLE incoming HTTP requests:
+   *   1. First request: send the prompt, start draining the stream. The
+   *      moment M365 invokes a tool (mcpBridge.waitForCall resolves before the
+   *      stream does), return `tool_calls` to the harness and remember the
+   *      bridge call id on `conv` — the stream itself is left exactly where it
+   *      is (mid-drain), not aborted.
+   *   2. The harness executes the tool and sends the result back as an
+   *      ordinary tool-role message. That request recognizes the pending
+   *      bridge call, delivers the result (unblocking the MCP server's held
+   *      tools/call HTTP response so M365's turn can continue), and resumes
+   *      draining the SAME stream from step 1.
+   *   3. Repeat until the stream ends with no further tool call: that's the
+   *      final answer.
+   *
+   * Known v1 limitations (see docs/plan/mcp-sidecar-4142.md): one bridged
+   * conversation in flight per process (matches this repo's own "run
+   * sequentially" convention and the Studio agent's one static connector
+   * endpoint); none of the fenced path's Disengaged/InternalError/priority-
+   * access retry machinery is replicated here yet — an upstream failure
+   * surfaces as a plain 502/error rather than being retried or classified.
+   */
+  async function produceNative(): Promise<Produced> {
+    mcpBridge.setTools(mapToolDefinitions(body.tools));
+
+    if (conv.pendingBridgeCallId) {
+      const toolMsg = body.messages.find(
+        (m) => m.role === "tool" && (m as any).tool_call_id === conv.pendingBridgeToolCallId,
+      );
+      if (!toolMsg) {
+        return {
+          kind: "error",
+          resp: jsonResponse(400, {
+            error: {
+              message: "Expected a tool result for the pending native tool call (M365_ALLOW_NATIVE_TOOLS), but none was found in the request.",
+              type: "invalid_request_error",
+            },
+          }),
+        };
+      }
+      mcpBridge.deliverResult(conv.pendingBridgeCallId, { content: getMessageContent(toolMsg), isError: false });
+      log.info(`Native tool call ${conv.pendingBridgeCallId} resolved by harness, resuming M365 turn`);
+      conv.pendingBridgeCallId = undefined;
+      conv.pendingBridgeToolCallId = undefined;
+      conv.sentMessageCount = body.messages.length;
+    } else if (!conv.nativeIterator) {
+      await awaitDegradationBackoff();
+      const waitForBudget = () => awaitTurnBudget({ signal: opts.signal, maxWaitMs: body.stream ? undefined : UNSTREAMED_BUDGET_WAIT_LIMIT_MS });
+      await waitForBudget();
+      let stream: NativeCopilotStream;
+      try {
+        stream = await session.run(text, model, opts.signal, useToolAgent, inputImages, waitForBudget);
+      } catch (err: any) {
+        return { kind: "error", resp: jsonResponse(502, { error: { message: err.message, type: "upstream_error" } }) };
+      }
+      conv.nativeStream = stream;
+      conv.nativeIterator = stream[Symbol.asyncIterator]();
+      conv.nativeFullText = "";
+      conv.sentMessageCount = body.messages.length;
+    }
+
+    while (true) {
+      let winner: { kind: "frame"; value?: string; done?: boolean } | { kind: "call"; call: Awaited<ReturnType<typeof mcpBridge.waitForCall>> };
+      try {
+        winner = await Promise.race([
+          conv.nativeIterator!.next().then((r) => ({ kind: "frame" as const, value: r.value, done: r.done })),
+          mcpBridge.waitForCall(opts.signal).then((call) => ({ kind: "call" as const, call })),
+        ]);
+      } catch (err: any) {
+        conv.nativeStream = undefined;
+        conv.nativeIterator = undefined;
+        conv.nativeFullText = undefined;
+        return { kind: "error", resp: jsonResponse(502, { error: { message: err?.message ?? "native turn error", type: "upstream_error" } }) };
+      }
+
+      if (winner.kind === "call") {
+        const toolCallId = `call_${crypto.randomUUID().replace(/-/g, "")}`;
+        conv.pendingBridgeCallId = winner.call.id;
+        conv.pendingBridgeToolCallId = toolCallId;
+        log.info(`Native tool call: ${winner.call.name} (bridge id ${winner.call.id}) — handing to harness as ${toolCallId}`);
+        return {
+          kind: "tools",
+          toolCalls: [{
+            id: toolCallId,
+            type: "function",
+            function: { name: winner.call.name, arguments: JSON.stringify(winner.call.arguments ?? {}) },
+          }],
+        };
+      }
+
+      if (winner.done) {
+        const stream = conv.nativeStream!;
+        const fullText = stream.fullText && stream.fullText.length > (conv.nativeFullText?.length ?? 0)
+          ? stream.fullText
+          : (conv.nativeFullText ?? "");
+        conv.nativeStream = undefined;
+        conv.nativeIterator = undefined;
+        conv.nativeFullText = undefined;
+        return { kind: "text", text: fullText };
+      }
+      conv.nativeFullText = (conv.nativeFullText ?? "") + (winner.value ?? "");
+    }
+  }
+
+  const activeProduce = nativeToolsEnabled ? produceNative : produce;
+
   // --- Render: JSON (non-stream) or an early-flushed SSE stream (stream) ---
   const includeUsage = !!body.stream_options?.include_usage;
   const usage = () => buildUsage(lastThrottle, lastContentOrigin, lastMessageType, lastScores, lastTurnCount, lastMetering);
 
   if (!body.stream) {
-    const p = await produce();
+    const p = await activeProduce();
     if (p.kind === "error") return p.resp;
     if (p.kind === "tools") {
       return jsonResponse(200, {
@@ -1068,7 +1239,7 @@ export async function handleChatCompletion(
       };
 
       let p: Produced;
-      try { p = await produce(liveDelta); }
+      try { p = await activeProduce(liveDelta); }
       catch (err: any) { p = { kind: "error", resp: jsonResponse(502, { error: { message: err?.message ?? "stream error", type: "upstream_error" } }) }; }
       clearInterval(hb);
       try {
@@ -1276,6 +1447,25 @@ function premiumOnlyModelResponse(model: string): Response {
       message: `M365 Copilot didn't serve ${model}: it returned InternalError on every attempt. ${model} is served only on a premium (paid Microsoft 365 Copilot) account; on any other account use claude-sonnet.`,
       type: "upstream_error",
       code: "model_route_unavailable",
+    },
+  });
+}
+
+/** The account's M365 Copilot license doesn't cover this model at all
+ *  (`result.value: "ForbiddenRequest"` — `InvalidCopilotLicense` /
+ *  `PremiumModelUnavailableForLicense` / `ClaudeUnavailableForLicense`, F46).
+ *  Distinct from `premiumOnlyModelResponse`: that's a dead route with NO
+ *  content (`InternalError`) on every account type; this one carries a real
+ *  BotConnection refusal and fires only for a seat lacking the entitlement. */
+function licenseDeniedResponse(model: string, result: { errorCode?: string; message?: string }): Response {
+  const scope = result.errorCode ? ` (${result.errorCode})` : "";
+  return jsonResponse(502, {
+    error: {
+      message: `M365 Copilot refused ${model}${scope}: ${result.message ?? "this account's license doesn't cover this model"} ` +
+        `This is an account licensing limit, not a throttle or an agent problem — retrying will not help; use a model your license covers (e.g. m365-copilot).`,
+      type: "upstream_error",
+      code: "model_license_denied",
+      ...(result.errorCode ? { param: result.errorCode } : {}),
     },
   });
 }

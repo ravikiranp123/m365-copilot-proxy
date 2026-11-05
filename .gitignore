@@ -42,3 +42,11 @@ scripts/da-app/gui-out/
 scripts/da-app/pkg/
 scripts/da-app/sentinel-agent.zip
 scripts/harness/out/
+.m365-ato/**
+.m365-profiles/**
+.m365-model-aliases.json
+.diag-out/**
+# MCP sidecar probe scratch (regenerated per run)
+scripts/mcp-sidecar/sentinel-value.txt
+scripts/mcp-sidecar/hits.log
+scripts/mcp-sidecar/server.out
