@@ -219,36 +219,53 @@ function validName(name: string): boolean {
   return /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name);
 }
 
+type ProfileState = {
+  name: string;
+  profile: ProfileConfig;
+  dataDir: string;
+  pid: number | undefined;
+  healthy: boolean;
+  running: boolean;
+  runningLabel: string;
+};
+
+async function profileStates(registry: ProfileRegistry): Promise<ProfileState[]> {
+  const states: ProfileState[] = [];
+
+  for (const [name, profile] of Object.entries(registry.profiles)) {
+    const pid = effectivePid(name, profile);
+    const up = await healthy(profile.port);
+    states.push({
+      name,
+      profile,
+      dataDir: dataDirOf(name, profile),
+      pid,
+      healthy: up,
+      running: Boolean(pid) || up,
+      runningLabel: pid ? `yes (pid ${pid})` : up ? "yes (unmanaged)" : "no",
+    });
+  }
+
+  return states;
+}
+
 // --- commands ---------------------------------------------------------------
 
 async function cmdList(): Promise<void> {
   const registry = readRegistry();
-  const names = Object.keys(registry.profiles);
-  if (names.length === 0) {
+  const states = await profileStates(registry);
+  if (states.length === 0) {
     console.log("No profiles. Add one with `pnpm profiles add <name> --port <port>`.");
     return;
   }
-  const rows: Array<{
-    name: string;
-    port: string;
-    running: string;
-    agent: string;
-    secrets: string;
-    dataDir: string;
-  }> = [];
-  for (const name of names) {
-    const p = registry.profiles[name];
-    const dir = dataDirOf(name, p);
-    const pid = effectivePid(name, p);
-    rows.push({
-      name,
-      port: String(p.port ?? "-"),
-      running: pid ? `yes (pid ${pid})` : (await healthy(p.port)) ? "yes (unmanaged)" : "no",
-      agent: p.env?.M365_AGENT_ID ? "yes" : "-",
-      secrets: hasSecrets(dir) ? "yes" : "MISSING",
-      dataDir: dir,
-    });
-  }
+  const rows = states.map(({ name, profile, dataDir, runningLabel }) => ({
+    name,
+    port: String(profile.port ?? "-"),
+    running: runningLabel,
+    agent: profile.env?.M365_AGENT_ID ? "yes" : "-",
+    secrets: hasSecrets(dataDir) ? "yes" : "MISSING",
+    dataDir,
+  }));
   const widths = {
     name: Math.max(4, ...rows.map((r) => r.name.length)),
     port: 4,
@@ -548,23 +565,33 @@ async function modelsFor(name: string, profile: ProfileConfig): Promise<string[]
 
 async function cmdSync(args: Args): Promise<void> {
   const registry = readRegistry();
+  const states = await profileStates(registry);
   const only = flagAll(args, "profile");
-  const names = only.length ? only : Object.keys(registry.profiles);
+  const selected = only.length
+    ? states.filter((state) => only.includes(state.name))
+    : states;
 
-  // One provider per profile/port — never a single shared catalog rebuilt
-  // from whichever profiles happen to be running right now. A profile that
-  // isn't up during this sync must leave its own previously synced provider
-  // entry alone instead of vanishing from it (the bug this replaces).
+  for (const name of only) {
+    if (!registry.profiles[name]) {
+      console.warn(`skipping unknown profile "${name}"`);
+    }
+  }
+
+  const runningProfileNames = new Set(
+    states.filter((state) => state.running).map((state) => state.name),
+  );
+  const configuredProfileNames = new Set(states.map((state) => state.name));
   const byProfile = new Map<string, { port: number; models: string[] }>();
   const aliases: Record<string, { alias: string; proxy: string; profile: string }> = {};
   let totalModels = 0;
 
-  for (const name of names) {
-    const profile = registry.profiles[name];
-    if (!profile) {
-      console.warn(`skipping unknown profile "${name}"`);
+  for (const state of selected) {
+    const { name, profile } = state;
+    if (!state.running) {
+      console.log(`${name}: stopped — removing synced provider if present`);
       continue;
     }
+
     try {
       const models = (await modelsFor(name, profile)).sort();
       const proxy = `http://localhost:${profile.port}`;
@@ -575,12 +602,14 @@ async function cmdSync(args: Args): Promise<void> {
       totalModels += models.length;
       console.log(`${name}: ${models.length} models (:${profile.port})`);
     } catch (err: any) {
-      console.warn(`${name}: skipped (${err.message}) — is it running? \`pnpm profiles start ${name}\``);
+      console.warn(
+        `${name}: running but model discovery failed (${err.message}); preserving its existing provider`,
+      );
     }
   }
 
-  if (byProfile.size === 0) {
-    fail("no running profiles to sync; start one first");
+  if (runningProfileNames.size === 0) {
+    console.warn("no running profiles; removing stopped proxy providers");
   }
 
   // Host prefix for each profile's own URL (default: localhost). --gateway
@@ -621,8 +650,8 @@ async function cmdSync(args: Args): Promise<void> {
     if (models[0]) console.log(`  m365-${name} -> ${host}:${port}/v1 (e.g. ${models[0]})`);
   }
 
-  syncOmp(byProfile, host);
-  syncOpencode(byProfile, host);
+  syncOmp(byProfile, host, runningProfileNames, configuredProfileNames);
+  syncOpencode(byProfile, host, runningProfileNames, configuredProfileNames);
 }
 
 /** Host prefix (protocol + hostname, no port/path) used to build each
@@ -651,10 +680,25 @@ function isReasoningModel(model: string): boolean {
  *  are touched; every other provider key (another profile's, or an unrelated
  *  provider entirely) is left exactly as it was. Supersedes the standalone
  *  sync-omp-models.mjs. */
-function syncOmp(byProfile: Map<string, { port: number; models: string[] }>, host: string): void {
+function syncOmp(
+  byProfile: Map<string, { port: number; models: string[] }>,
+  host: string,
+  runningProfileNames: Set<string>,
+  configuredProfileNames: Set<string>,
+): void {
   const modelsFile = join(homedir(), ".omp", "agent", "models.yml");
   const existing = existsSync(modelsFile) ? (YAML.parse(readFileSync(modelsFile, "utf8")) ?? {}) : {};
   existing.providers ??= {};
+
+  // Remove only stale providers owned by this proxy. Preserve every unrelated
+  // OMP provider configured by the user.
+  for (const key of Object.keys(existing.providers)) {
+    if (!key.startsWith("m365-")) continue;
+    const name = key.slice("m365-".length);
+    if (!configuredProfileNames.has(name) || !runningProfileNames.has(name)) {
+      delete existing.providers[key];
+    }
+  }
 
   for (const [name, { port, models }] of byProfile) {
     existing.providers[`m365-${name}`] = {
@@ -682,7 +726,12 @@ function syncOmp(byProfile: Map<string, { port: number; models: string[] }>, hos
  *  any hand-set per-model fields (tool_call, limit) on an id that already
  *  existed are left untouched. A `.backup-<timestamp>` is written first,
  *  matching this file's existing manual-edit convention. */
-function syncOpencode(byProfile: Map<string, { port: number; models: string[] }>, host: string): void {
+function syncOpencode(
+  byProfile: Map<string, { port: number; models: string[] }>,
+  host: string,
+  runningProfileNames: Set<string>,
+  configuredProfileNames: Set<string>,
+): void {
   const configFile = join(homedir(), ".config", "opencode", "opencode.json");
   if (!existsSync(configFile)) {
     console.warn(`skipped opencode sync: ${configFile} not found`);
@@ -692,6 +741,16 @@ function syncOpencode(byProfile: Map<string, { port: number; models: string[] }>
   const raw = readFileSync(configFile, "utf8");
   const config = JSON.parse(raw);
   config.provider ??= {};
+
+  // Remove only stale providers owned by this proxy. Preserve every unrelated
+  // OpenCode provider configured by the user.
+  for (const key of Object.keys(config.provider)) {
+    if (!key.startsWith("m365-")) continue;
+    const name = key.slice("m365-".length);
+    if (!configuredProfileNames.has(name) || !runningProfileNames.has(name)) {
+      delete config.provider[key];
+    }
+  }
 
   for (const [name, { port, models }] of byProfile) {
     const key = `m365-${name}`;

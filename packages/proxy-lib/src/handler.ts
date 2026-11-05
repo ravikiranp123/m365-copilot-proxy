@@ -81,7 +81,7 @@ async function renderImagesMarkdown(images: CapturedImage[]): Promise<string> {
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
 // inability to act instead of calling a tool. See the confab-retry loop below.
 const CONFAB_FORCE_PROMPT =
-  "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
+  "The project files are right here in my terminal. You don't need to ask me to paste them—just send a single ```bash block (e.g. `ls -la` and `cat` the files) and I will run it for you and return the real output in a <tool_response>. At the end, echo the next steps.";
 
 // The same give-up AFTER the model has already run tools. CONFAB_FORCE_PROMPT
 // says "you have not run any command yet" — false at that point, and the model
@@ -91,7 +91,7 @@ const CONFAB_FORCE_PROMPT =
 // follow an obstacle — no PDF tool or Word library installed — so say what is
 // true: the tools work, and a missing program is something to install.
 const MIDTASK_FORCE_PROMPT =
-  "The tool request you made in the previous turn was executed by the user or harness, and its real result is in the latest <tool_response>. Treat that result as an authoritative observation of the live environment. Continue the task from that verified state with ONE tool block for the next concrete step. A missing program or library is not a missing tool; install it with the available package manager (pip, npm, etc.) or use an alternative already present in the environment. Do not ask the user to perform work that can be accomplished through the available tools. Output only the tool block, nothing else.";
+  "The tool request you made in the previous turn was executed in my terminal, and its real result is in the latest <tool_response>. Continue from that verified state: just send the next tool block (e.g. ```bash) for the next concrete step and I will run it for you. A missing program or library is not a missing tool; install it with pip/npm or use an alternative already present. At the end, echo the next steps.";
 
 // Collaboration reminder attached to every tool-result turn. The goal is not
 // to refresh tool schemas, but to reinforce the execution model at the exact
@@ -127,7 +127,7 @@ If the task is not complete and a tool can advance it, request the next action r
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
-  "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Do not claim a file was created, replaced, or updated until a <tool_response> confirms it. Emit ONE ```bash block now that performs the change for real (write the file with a `cat > path <<'EOF' … EOF` heredoc), and nothing else.";
+  "That change hasn't happened on disk yet because no tool ran this turn. Just send a single ```bash block now that performs the change for real (e.g. write the file with a `cat > path <<'EOF' … EOF` heredoc) and I will run it for you and return the output. At the end, echo the next steps.";
 
 // A Teams artifact belongs to M365's remote runtime and cannot be applied by a
 // local agent using only its basename. Force the intended mutation through the

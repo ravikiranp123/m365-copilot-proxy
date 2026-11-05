@@ -522,7 +522,7 @@ describe("Disengage retry keeps a model's <system>-free framing", () => {
 
 
   it("still retries the <system>-tagged defaults with softened (F22)", async () => {
-    const retry = await disengageThenAnswer("gpt-5.5-think-deeper");
+    const retry = await disengageThenAnswer("gpt-5.6-think-deeper");
     expect(retry).toContain("<system>");
     expect(retry).toContain("You are an automated coding agent working in a real working directory");
   });

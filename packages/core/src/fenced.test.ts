@@ -656,6 +656,14 @@ describe("defaultFramingForTone", () => {
     expect(transcriptStyleForVariant("relay_batch").framingTag).toBeNull();
   });
 
+  it("renders relay_next with the pair-programming and next-steps guidance", () => {
+    const out = formatFencedToolDefinitions([bash, readFile], "relay_next");
+    expect(out).toContain("just send a single ```bash block");
+    expect(out).toContain("NEXT:");
+    expect(out).toMatch(/sandbox/);
+    expect(transcriptStyleForVariant("relay_next").framingTag).toBeNull();
+  });
+
   it("asks for batching only when there's a shell to batch in — otherwise it is relay (§25 H25b)", () => {
     // Shell-less, "a script can look at the files…" read as a request only its
     // own sandbox could meet: Sonnet 4.6 3/7 vs relay 6/6.
@@ -663,10 +671,16 @@ describe("defaultFramingForTone", () => {
     expect(formatFencedToolDefinitions([bash, readFile], "relay_batch")).not.toBe(formatFencedToolDefinitions([bash, readFile], "relay"));
   });
 
-  it("leaves every other tone on the bench-tuned baseline", () => {
-    for (const tone of ["magic", "Claude_Sonnet_Reasoning", "Gpt_5_5_Reasoning", undefined]) {
+  it("leaves every unmapped tone on the bench-tuned baseline", () => {
+    for (const tone of ["magic", "Gpt_5_6_Reasoning", "Gpt_5_6_Chat", undefined]) {
       expect(defaultFramingForTone(tone)).toBeUndefined();
     }
+  });
+
+  it("gives Gpt_5_5_*, Claude_Sonnet_Reasoning relay_batch to avoid prompt-shield Disengaged", () => {
+    expect(defaultFramingForTone("Gpt_5_5_Chat")).toBe("relay_batch");
+    expect(defaultFramingForTone("Gpt_5_5_Reasoning")).toBe("relay_batch");
+    expect(defaultFramingForTone("Claude_Sonnet_Reasoning")).toBe("relay_batch");
   });
 
   it("gives the Claude_Sonnet tone the <system>-free relay_batch (Sonnet 4.6, §25 F62)", () => {
@@ -740,9 +754,11 @@ describe("defaultFramingForModel", () => {
 
   it("falls through to the tone default for everything else", () => {
     expect(defaultFramingForModel("claude-opus")).toBe("relay_batch");
-    expect(defaultFramingForModel("claude-sonnet-think-deeper")).toBeUndefined(); // unmeasured: stays baseline
+    expect(defaultFramingForModel("claude-sonnet-think-deeper")).toBe("relay_batch");
+    expect(defaultFramingForModel("gpt-5.5-think-deeper")).toBe("relay_batch");
+    expect(defaultFramingForModel("gpt-5.5")).toBe("relay_batch");
     expect(defaultFramingForModel("m365-copilot")).toBeUndefined();
-    expect(defaultFramingForModel("gpt-5.5-think-deeper")).toBeUndefined();
+    expect(defaultFramingForModel("gpt-5.6-think-deeper")).toBeUndefined();
   });
 });
 

@@ -128,7 +128,7 @@ export function profilePort(name: string, registry: ProfileRegistry = loadProfil
   return typeof port === "number" && Number.isFinite(port) ? port : undefined;
 }
 
-interface ModelEntry {
+export interface ModelEntry {
   id: string;
   object: string;
   created: number;
@@ -136,7 +136,7 @@ interface ModelEntry {
   [key: string]: unknown;
 }
 
-interface ModelsPayload {
+export interface ModelsPayload {
   object: "list";
   data: ModelEntry[];
 }
