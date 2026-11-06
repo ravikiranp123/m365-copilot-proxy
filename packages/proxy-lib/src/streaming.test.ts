@@ -755,6 +755,30 @@ describe("follow-up turns and give-ups (Windows / pi, measured)", () => {
     expect(m.content).toContain("If you can't access the API");
     scripted.queue = [];
   });
+
+  // Live (ato, 2026-11-03): two valid tool calls written for the user instead of
+  // made. isProseDocument returned the turn as text, so nothing ran and the turn
+  // stalled with no forcing retry.
+  it("forces a retry when valid tool calls are handed back instead of made", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      {
+        fullText:
+          "Confirmed — `TOOL_REMINDER_INTERVAL` is properly defined on the branch, and the only problem is the stale assertion string. Let's fix it and amend the commit so the branch's single commit is self-consistent and all-green.\n\n" +
+          "I keep reaching for my own sandbox tools by habit — that file lives on your machine, not mine. Here's the real fix, for you to run:\n\n" +
+          "```bash\nnpx vitest run\n```\n\n" +
+          "Once that's applied, run this to verify:\n\n" +
+          "```bash\ngit commit --amend --no-edit\n```\n",
+      },
+      { fullText: "```bash\nls -la\n```" },
+    ];
+    const m = await ask([{ role: "user", content: `fix ${Math.random()}` }], new SessionPool());
+    expect(scripted.texts).toHaveLength(2); // the hand-back retry ran
+    expect(scripted.texts[1]).toContain("You wrote the next call out for me");
+    expect(m.tool_calls?.[0] && JSON.parse(m.tool_calls[0].function.arguments).command).toBe("ls -la");
+    scripted.queue = [];
+  });
 });
 
 describe("a new harness session that shares the first user message", () => {

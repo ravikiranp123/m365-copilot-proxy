@@ -405,6 +405,44 @@ export function looksLikeConfabulation(text: string | null): boolean {
   return CONFABULATION_PATTERNS.some((re) => re.test(t));
 }
 
+// The model wrote the call INSTEAD of making it: "here's the fix, as an `edit`
+// block for you to run", "I'd strongly recommend… I'd preserve it as:", "that
+// file lives on your machine, not mine". Distinct from CONFABULATION_PATTERNS,
+// which catch a claimed inability to act at all. These turns usually carry
+// perfectly valid tool calls that `isProseDocument` swallows when the lead-in is
+// long, so nothing runs and the turn stalls with no forcing retry (measured:
+// 19 turns across the ato/h2564 logs, 6 with these markers).
+//
+// Deliberately FIRST-PERSON or explicitly hand-off. A second-person "you can run
+// X" is what a genuine README says, and this detector is applied to a discarded
+// document's preamble — a false positive costs a wasted turn on a real answer.
+const HAND_BACK_PATTERNS: RegExp[] = [
+  /\bfor\s+you\s+to\s+(?:run|execute|apply|paste|copy)\b/i,
+  /\b(?:run|execute|apply)\s+(?:this|these|it)\s+yourself\b/i,
+  /\byou\s+(?:should|must|need\s+to|'ll\s+need\s+to|will\s+need\s+to)\s+(?:run|execute|apply)\b/i,
+  // First-person conditional: the model states what IT would do, and stops.
+  /\bI'?d\s+(?:strongly\s+)?(?:run|use|recommend|suggest|preserve|go\s+with|do)\b/i,
+  /\bI\s+would\s+(?:strongly\s+)?(?:run|use|recommend|suggest|preserve|go\s+with)\b/i,
+  // Denying its own reach in the same breath as the command (tool amnesia).
+  /\blives?\s+on\s+your\s+machine\b/i,
+  /\bno\s+command\s+has\s+been\s+executed\b/i,
+  /\bI\s+can'?t\s+actually\b/i,
+  /\binstead\s+of\s+(?:actually\s+)?(?:doing|running|executing)\b/i,
+];
+
+/**
+ * Does this no-tool-call turn hand the action back to the reader? Used only for
+ * a reply that `isProseDocument` returned as text while it held valid tool calls:
+ * the preamble saying "for you to run" is what separates a swallowed action from
+ * a genuine written document.
+ */
+export function looksLikeHandBack(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 8) return false;
+  return HAND_BACK_PATTERNS.some((re) => re.test(t));
+}
+
 // A tool result the MODEL wrote. The proxy is the only thing that sends
 // <tool_response> blocks, so one in the model's own output is invented.
 const SELF_WRITTEN_RESULT = /<tool_(?:response|result)\b/i;

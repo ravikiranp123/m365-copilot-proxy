@@ -121,6 +121,7 @@ export {
   getMessageContent,
   parseToolCalls,
   looksLikeConfabulation,
+  looksLikeHandBack,
   looksLikeHallucinatedCompletion,
   looksLikeRemoteArtifactCompletion,
   truncateAtFabricatedToolResponse,

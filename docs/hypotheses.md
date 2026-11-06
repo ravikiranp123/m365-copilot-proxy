@@ -5640,3 +5640,60 @@ bursty. Falsifier: fresh-conversation retries failing at the same rate as same-c
 Cost to watch: each such retry starts a conversation, which is what the F13 thread-rate throttle
 counts. Bounded to one per dropped turn, but on a bad `InternalError` day it adds up; the same
 afternoon's benching (one conversation per run) did trip `PerUserThrottled`.
+
+## 39. Nov 6 2026 — `isProseDocument` swallows valid tool calls: the "here's the fix, for you to run" stall
+
+**Observation.** A turn that ends with a *suggestion* rather than an action is usually not a
+model refusal. In the `ato` and `h2564` debug logs, 19 turns logged
+`Response is a prose document (N embedded fences), returning as text instead of executing` — and
+those turns had **parsed, valid tool calls** that the document guard then discarded. 12 in `ato`,
+7 in `h2564`; fence counts 2 (×12), 3 (×5), 7 and 8. Of the 19, 6 carried explicit hand-back
+markers ("for you to run", "I'd strongly recommend", "instead") and 4 carried amnesia markers
+("lives on your machine, not mine", "I can't actually").
+
+Replayed through the shipped parser (`2026-11-03T08:42:03`, ato):
+
+```
+Raw response (tool mode): Confirmed — `TOOL_REMINDER_INTERVAL` is properly defined…
+  … that file lives on your machine, not mine. Here's the real fix, as an `edit` block for you to run:
+  ```edit / ```bash …
+Response is a prose document (2 embedded fences), returning as text instead of executing
+Parse result: hasToolCalls=false, count=0
+```
+
+`parseToolCalls` returns `['edit','bash']` with every required param present; `isProseDocument`
+returns `true` because the leftover prose is 464 chars.
+
+**Reading.** Two independent causes, both in `parseReply`:
+
+1. `isProseDocument` (`packages/core/src/tools.ts`) flags a document on `prose.length >= 300`, and
+   its escape hatch (`looksLikeDocumentPreamble`) is defeated by exactly the long conversational
+   lead-in that a hand-back opens with. Two real tool calls are then returned as text.
+2. `judged` is narrowed to the **first** paragraph, but a hand-back announces itself in the
+   *second* ("…that file lives on your machine, not mine. Here's the real fix…"). The give-up
+   checks read paragraph 1 ("Confirmed — … Let's fix it"), find nothing, and no forcing retry runs.
+   The turn falls through both nets.
+
+OMP's native `features.unexpectedStopDetection` does **not** cover this class. The proxy has
+already flattened the turn to `hasToolCalls=false`, and OMP's `unexpected-stop` judge prompt
+classifies "offers options or optional next steps for the user to pick … even when it says what it
+would do next" as a **normal** stop — a near-verbatim match. `mechanical` (the old default) never
+looks at text-only stops at all. `smart` catches the *bare promise* class ("Next: run the probe"),
+not the hand-back.
+
+**Change.** `looksLikeHandBack` (`core/tools.ts`) — first-person or explicit hand-off markers
+only; a second-person "you can run X" is what a genuine README says. `parseReply` counts the calls
+the document guard swallowed and judges only the **pre-fence preamble**. `handler.ts` then forces
+one corrective turn in the same conversation (`HAND_BACK_FORCE_PROMPT`), gated on that count.
+`M365_NO_HANDBACK_RETRY=1` disables it; `M365_HANDBACK_RETRIES` tunes the count.
+
+Deliberately *not* executing the discarded calls: the same shape can be advisory about something
+destructive ("you could `git stash push -u`"), so one corrective turn lets the model decide with a
+reminder in hand, at the cost of a single message — the thread throttle counts *conversations*, not
+messages, so this is cheap.
+
+**Open.** Unit-tested, not yet live (n=0). Falsifiers: the retry fires on a genuine README (a
+false positive costs one wasted turn, which is why the detector excludes second-person advice), or
+the model repeats the hand-back — in which case the remaining recovery belongs in an OMP
+`session_stop` hook, not the proxy. The amnesia/drift class with **no** executable fence (ato: 156
+`no_tools` hits, 35 `no_context`; h2564: 50 and 0) has nothing to route and still needs that hook.
