@@ -3,6 +3,8 @@ import {
   localProfileName,
   profileNames,
   splitProfileModel,
+  withProfileModels,
+  type ModelsPayload,
   type ProfileRegistry,
 } from "@m365-copilot/proxy-lib";
 
@@ -36,4 +38,31 @@ export function resolveModelRoute(
   }
 
   return { kind: "unknown-profile", profile: split.profile, model: split.model, known: names };
+}
+
+/**
+ * Filter and format the models payload for the active profile proxy.
+ * By default, only local models are advertised so clients with direct
+ * per-profile URLs do not see cross-profile duplicate entries.
+ */
+export function resolveModelsPayload(
+  payload: ModelsPayload,
+  profileName: string = localProfileName(),
+  registry: ProfileRegistry = loadProfileRegistry(),
+  advertiseAll: boolean = process.env.M365_ADVERTISE_ALL_PROFILES === "1",
+): ModelsPayload {
+  let data = payload.data;
+  if (profileName) {
+    const profile = registry.profiles[profileName];
+    if (profile?.models?.length) {
+      const allowed = new Set(profile.models);
+      data = data.filter((m) => allowed.has(m.id));
+    }
+  }
+
+  if (advertiseAll) {
+    return withProfileModels({ ...payload, data }, profileNames(registry));
+  }
+
+  return { ...payload, data };
 }

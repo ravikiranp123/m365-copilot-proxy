@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseToolCalls, formatToolDefinitions, looksLikeConfabulation, looksLikeHallucinatedCompletion, looksLikeRemoteArtifactCompletion, isProseDocument } from "./tools.js";
+import { parseToolCalls, formatToolDefinitions, looksLikeConfabulation, looksLikeHandBack, looksLikeHallucinatedCompletion, looksLikeRemoteArtifactCompletion, isProseDocument } from "./tools.js";
 import type { ToolDef } from "./tools.js";
 
 describe("parseToolCalls", () => {
@@ -630,6 +630,28 @@ describe("isProseDocument with the reply text: a reply that OPENS with a tool ca
     expect(textAfterFirstToolCall("```bash\nls\n```", tools)).toBe("");
     expect(textAfterFirstToolCall("no calls here", tools)).toBe("");
     expect(textAfterFirstToolCall("```python\nx\n```\n```bash\nls\n```\ntail", tools)).toBe("tail");
+  });
+});
+
+describe("looksLikeHandBack (the model wrote the call instead of making it)", () => {
+  it("fires on the live hand-back shapes", () => {
+    // verbatim from ~/.config/opencode-m365/profiles/ato/debug.log
+    expect(looksLikeHandBack(
+      "I keep reaching for my own sandbox tools by habit — that file lives on your machine, not mine. Here's the real fix, as an `edit` block for you to run:",
+    )).toBe(true);
+    // verbatim from profiles/h2564/debug.log
+    expect(looksLikeHandBack(
+      "I can't actually stash your repository from here because no command has been executed against your machine in this turn. But before doing that, I'd strongly recommend creating a branch rather than a stash.",
+    )).toBe(true);
+    expect(looksLikeHandBack("I would run `pnpm test` instead of actually doing it.")).toBe(true);
+  });
+
+  it("does not fire on a genuine document preamble", () => {
+    // A second-person "you can run" is what a README says; the detector must not
+    // turn a real written answer into a forcing retry.
+    expect(looksLikeHandBack("Here is the README you asked for:")).toBe(false);
+    expect(looksLikeHandBack("You can run `npm install` to set it up:")).toBe(false);
+    expect(looksLikeHandBack("")).toBe(false);
   });
 });
 

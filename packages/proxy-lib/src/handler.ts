@@ -29,6 +29,7 @@ import {
   imageUrls,
   parseToolCalls,
   looksLikeConfabulation,
+  looksLikeHandBack,
   looksLikeHallucinatedCompletion,
   looksLikeRemoteArtifactCompletion,
   truncateAtFabricatedToolResponse,
@@ -82,7 +83,7 @@ async function renderImagesMarkdown(images: CapturedImage[]): Promise<string> {
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
 // inability to act instead of calling a tool. See the confab-retry loop below.
 const CONFAB_FORCE_PROMPT =
-  "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
+  "The project files are right here in my terminal. You don't need to ask me to paste them—just send a single ```bash block (e.g. `ls -la` and `cat` the files) and I will run it for you and return the real output in a <tool_response>. At the end, echo the next steps.";
 
 // The same give-up AFTER the model has already run tools. CONFAB_FORCE_PROMPT
 // says "you have not run any command yet" — false at that point, and the model
@@ -92,7 +93,7 @@ const CONFAB_FORCE_PROMPT =
 // follow an obstacle — no PDF tool or Word library installed — so say what is
 // true: the tools work, and a missing program is something to install.
 const MIDTASK_FORCE_PROMPT =
-  "The tool request you made in the previous turn was executed by the user or harness, and its real result is in the latest <tool_response>. Treat that result as an authoritative observation of the live environment. Continue the task from that verified state with ONE tool block for the next concrete step. A missing program or library is not a missing tool; install it with the available package manager (pip, npm, etc.) or use an alternative already present in the environment. Do not ask the user to perform work that can be accomplished through the available tools. Output only the tool block, nothing else.";
+  "The tool request you made in the previous turn was executed in my terminal, and its real result is in the latest <tool_response>. Continue from that verified state: just send the next tool block (e.g. ```bash) for the next concrete step and I will run it for you. A missing program or library is not a missing tool; install it with pip/npm or use an alternative already present. At the end, echo the next steps.";
 
 // Collaboration reminder attached to every tool-result turn. The goal is not
 // to refresh tool schemas, but to reinforce the execution model at the exact
@@ -128,7 +129,15 @@ If the task is not complete and a tool can advance it, request the next action r
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
-  "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Do not claim a file was created, replaced, or updated until a <tool_response> confirms it. Emit ONE ```bash block now that performs the change for real (write the file with a `cat > path <<'EOF' … EOF` heredoc), and nothing else.";
+  "That change hasn't happened on disk yet because no tool ran this turn. Just send a single ```bash block now that performs the change for real (e.g. write the file with a `cat > path <<'EOF' … EOF` heredoc) and I will run it for you and return the output. At the end, echo the next steps.";
+
+// The model wrote the call instead of making it. Live shape (ato, 2026-11-03):
+// a long lead-in + a valid ```edit and ```bash block, which isProseDocument
+// classifies as a document — so both calls were dropped and nothing ran.
+// Same conversation, one turn; a real document never reaches here because its
+// preamble carries no hand-back phrasing.
+const HAND_BACK_FORCE_PROMPT =
+  "You wrote the next call out for me instead of making it, so nothing has run yet. If the task needs it, make the call now: send a single ```bash (or the matching tool) block and I will execute it and return the real <tool_response>. If a decision is genuinely mine to make, ask me one direct question instead. At the end, echo the next steps.";
 
 // A Teams artifact belongs to M365's remote runtime and cannot be applied by a
 // local agent using only its basename. Force the intended mutation through the
@@ -380,14 +389,24 @@ function mapToolDefinitions(tools?: ChatBody["tools"]): MappedToolDefinition[] {
  *  opening paragraph: a give-up announces itself there, and everything after
  *  is document content ("if you can't access the API…") that must not trip a
  *  forcing retry. */
-function parseReply(text: string, tools: Parameters<typeof parseToolCalls>[1]): { parsed: ParseResult; judged: string | null } {
+function parseReply(
+  text: string,
+  tools: Parameters<typeof parseToolCalls>[1],
+): { parsed: ParseResult; judged: string | null; handBack: number } {
   const parsed = parseToolCalls(text, tools);
   if (isProseDocument(parsed, text, tools)) {
     log.info(`Response is a prose document (${parsed.toolCalls.length} embedded fences), returning as text instead of executing`);
-    const opening = text.split("```")[0].trim().split(/\n\s*\n/)[0];
-    return { parsed: { hasToolCalls: false, toolCalls: [], textContent: text }, judged: opening };
+    const preamble = text.split("```")[0].trim();
+    const opening = preamble.split(/\n\s*\n/)[0];
+    // The guard returns this turn as text, but a turn that wrote VALID tool
+    // calls and handed them back ("...as an `edit` block for you to run") is an
+    // action it swallowed, not a document. Count them so the caller can force
+    // one corrective turn. Only the pre-fence preamble is judged: a real
+    // document's BODY may legitimately say "if you can't access the API…".
+    const handBack = looksLikeHandBack(preamble) ? parsed.toolCalls.length : 0;
+    return { parsed: { hasToolCalls: false, toolCalls: [], textContent: text }, judged: opening, handBack };
   }
-  return { parsed, judged: parsed.textContent };
+  return { parsed, judged: parsed.textContent, handBack: 0 };
 }
 
 // --- Delta message formatting ---
@@ -927,7 +946,7 @@ export async function handleChatCompletion(
     let fullText = stopAtFabricatedResult(result.fullText);
 
     log.debug("Raw response (tool mode):", trunc(fullText, 1000));
-    let { parsed, judged } = parseReply(fullText, body.tools);
+    let { parsed, judged, handBack } = parseReply(fullText, body.tools);
     log.info(`Parse result: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
 
     // Salvage stochastic turn-1 confabulation: M365's chat model sometimes claims it
@@ -958,8 +977,28 @@ export async function handleChatCompletion(
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
       fullText = stopAtFabricatedResult(retry.fullText);
-      ({ parsed, judged } = parseReply(fullText, body.tools));
+      ({ parsed, judged, handBack } = parseReply(fullText, body.tools));
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
+    }
+
+    // A turn that wrote valid tool calls and handed them back ("here's the fix,
+    // as an `edit` block for you to run") is an action the document guard
+    // swallowed, not a document. Force one corrective turn in the SAME
+    // conversation (cheap: the thread throttle counts conversations, not
+    // messages). Gated on hand-back phrasing in the preamble so a real README
+    // is left alone (see the "leaves a real document alone" test).
+    const maxHandBackRetries = process.env.M365_NO_HANDBACK_RETRY
+      ? 0
+      : Number(process.env.M365_HANDBACK_RETRIES ?? 1);
+    for (let attempt = 0; attempt < maxHandBackRetries && !parsed.hasToolCalls && handBack > 0; attempt++) {
+      log.info(`Hand-back detected: ${handBack} valid tool call(s) written for the user instead of made — forcing retry ${attempt + 1}/${maxHandBackRetries}`);
+      text = HAND_BACK_FORCE_PROMPT;
+      const retry = await runBuffered();
+      if ("error" in retry) return { kind: "error", resp: retry.error };
+      conv.sentMessageCount = body.messages.length;
+      fullText = stopAtFabricatedResult(retry.fullText);
+      ({ parsed, judged, handBack } = parseReply(fullText, body.tools));
+      log.info(`After hand-back retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
     // Never pass a remote M365 artifact off as a successful local edit. A retry

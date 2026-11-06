@@ -14,6 +14,8 @@ export {
   resolveDataDir,
   splitProfileModel,
   withProfileModels,
+  type ModelEntry,
+  type ModelsPayload,
   type ProfileConfig,
   type ProfileRegistry,
 } from "./profiles.js";
